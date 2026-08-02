@@ -1,0 +1,102 @@
+[validation]
+# 阶段三先完成工具和方法阳性对照资格，不能用未校准阈值筛选 P15。
+method_id = "flexpepdock-local-refine-disulfide-v1"
+qualification_status = "unresolved"
+qualification_report = "unresolved"
+qualification_report_sha256 = "unresolved"
+# 正式局部精修对每个起始姿态使用 4 条独立随机流。
+seeds = [120623, 120624, 120625, 120626]
+
+[validation.rosetta]
+executable = "/home/glen/apps/rosetta/source/bin/FlexPepDocking.cxx11threadmpiserialization.linuxgccrelease"
+scripts_executable = "/home/glen/apps/rosetta/source/bin/rosetta_scripts.cxx11threadmpiserialization.linuxgccrelease"
+database = "/home/glen/apps/rosetta/database"
+version_file = "/home/glen/apps/rosetta/source/src/utility/version.hh"
+expected_version = "2025.37+release.df75a9c"
+# 每个 FlexPepDock 任务单进程独占目录，跨 seed/起点在任务层并行。
+parallel_tasks = 8
+# 每个 start×seed 任务生成 128 个 decoy；每个起始姿态共 512 个。
+decoys_per_seed = 128
+
+[validation.cg2all]
+# 阶段三使用独立 cg2all 环境；显式 checkpoint 避免运行时下载或模型漂移。
+executable = "/home/glen/apps/cabsflex/.venv-cg2all/bin/convert_cg2all"
+package_metadata = "/home/glen/apps/cabsflex/.venv-cg2all/lib/python3.9/site-packages/cg2all-1.2.0.dist-info/METADATA"
+checkpoint = "/home/glen/apps/cabsflex/.venv-cg2all/lib/python3.9/site-packages/cg2all/model/CalphaSCModel.ckpt"
+checkpoint_sha256 = "6c4e5c96ff69bf45d6a2f876021b8e4afea4101ccdbcc9376ff1e61622691ea1"
+expected_version = "1.2.0"
+
+[[validation.bound_states]]
+state_id = "4IB5_A_D"
+receptor_id = "4IB5_A"
+ligand_id = "Pc"
+ligand_author_chain_id = "D"
+local_control_kind = "standard_cyclic_peptide"
+ligand_sequence = "GCRLYGFKIHGCG"
+disulfide_bonds = [[2, 12]]
+histidines = {"10" = "HIE"}
+selection_reason = "A-D is the primary CK2α-Pc pair; it has 186 heavy-atom contacts within 4.5 Å and the lowest-B-factor directly paired Pc copy."
+
+[[validation.bound_states]]
+state_id = "9FBM_A_F"
+receptor_id = "9FBM_A"
+ligand_id = "FMP37"
+ligand_author_chain_id = "F"
+local_control_kind = "site_reference_only"
+ligand_sequence = "unresolved"
+disulfide_bonds = []
+histidines = {}
+selection_reason = "A-F is the best-resolved directly paired CK2α-FMP37 copy; the noncanonical peptidomimetic is retained as a site reference, not forced into standard peptide redocking."
+
+[[validation.bound_states]]
+state_id = "9FBI_A_E"
+receptor_id = "9FBI_A"
+ligand_id = "FMP37"
+ligand_author_chain_id = "E"
+local_control_kind = "site_reference_only"
+ligand_sequence = "unresolved"
+disulfide_bonds = []
+histidines = {}
+selection_reason = "Only CK2α′ author chain A contacts FMP37 chain E; chain B is 47.98 Å away and is not treated as a bound copy."
+
+[[validation.local_controls]]
+# 当前局部方法资格对象。以后增加或替换标准环肽控制时改此登记，不修改 Python 代码。
+control_id = "4IB5_Pc_local_recovery"
+bound_state_id = "4IB5_A_D"
+prepack_seed = 2701
+seed_batches = [[2701, 2703, 2705, 2707], [2711, 2713, 2715, 2717]]
+random_translation_A = 2.0
+random_rotation_degrees = 15.0
+ranking_score = "reweighted_sc"
+recovery_rmsd_score = "rmsBB"
+top_clusters = 10
+max_recovery_rmsd_A = 2.0
+max_cluster_backbone_rmsd_A = 2.0
+# 近天然簇内必须有至少两个 seed 各自产生 RMSD 达标的 decoy。
+min_cluster_seed_support = 2
+max_batch_pose_rmsd_A = 2.0
+
+[[validation.guided_templates]]
+# 只使用 Pc 的 Cys2-Cys12 实验环骨架；映射长度、方向和二硫键端点均显式声明。
+template_id = "4IB5_Pc_loop_to_P15"
+bound_state_id = "4IB5_A_D"
+ligand_positions = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+selection_reason = "Pc residues 2-12 form an 11-residue Cys-Cys loop matching the P15 ring span; only this standard-peptide template is eligible for automatic backbone threading."
+
+[[validation.environment_references]]
+reference_id = "4MD7_assembly_1"
+receptor_id = "4MD7_E"
+assembly_id = "1"
+beta_author_chain_ids = ["A", "B"]
+other_catalytic_author_chain_ids = ["F"]
+evaluation_targets = ["ck2_alpha", "ck2_alpha_prime"]
+construct_note = "Full-length symmetric CK2 holoenzyme layout; CK2alpha carries C-terminal T344E/T360E/S362E/S370E substitutions, not F121E."
+
+[[validation.environment_references]]
+reference_id = "1JWH_assembly_1"
+receptor_id = "1JWH_A"
+assembly_id = "1"
+beta_author_chain_ids = ["C", "D"]
+other_catalytic_author_chain_ids = ["B"]
+evaluation_targets = ["ck2_alpha", "ck2_alpha_prime"]
+construct_note = "Wild-type human CK2 holoenzyme with C-terminally truncated catalytic subunits."

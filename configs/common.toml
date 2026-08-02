@@ -1,0 +1,139 @@
+[paths]
+# 项目目录覆盖；相对路径以 configs/ 为基准。
+data_dir = "../data"
+outputs_dir = "../outputs"
+
+[chemistry.ligand]
+# 裸 P15 的生产主状态：游离 N 端、C 端酰胺、pH 7.4、His7=HIE。
+# C 端酰胺有 CIGB-300 合成与质谱依据；游离 N 端和 HIE 是从完整药物中分离
+# 11-mer 活性域后的计算假设，不代表完整的 Tat-βAla-P15 药物。
+ligand_id = "p15"
+chemistry_id = "p15-free-n-amide-hie-ph7p4"
+sequence = "CWMSPRHLGTC"
+chirality = "L"
+disulfide_bonds = [[1, 11]]
+n_terminus = "NH3+"
+c_terminus = "CONH2"
+target_ph = 7.4
+net_charge = 2
+other_modifications_status = "none"
+other_modifications = []
+decision_sources = [
+    "doi:10.1158/0008-5472.CAN-04-2086",
+    "doi:10.1002/psc.3081",
+    "https://www.sigmaaldrich.com/DE/en/product/sigma/sml3143",
+    "project-assumption:isolated-p15-has-free-n-terminus-and-neutral-hie7-at-ph7.4",
+]
+
+[chemistry.ligand.histidines]
+"7" = "HIE"
+
+[[receptors]]
+# CK2α apo 主发现受体。
+receptor_id = "3Q04_A"
+pdb_id = "3Q04"
+target = "ck2_alpha"
+uniprot_accession = "P68400"
+author_chain_id = "A"
+structure_state = "apo"
+roles = ["technical_pilot", "blind_discovery"]
+prepare = true
+water_policy = "remove_all"
+remove_components = ["EDO", "SO4"]
+retain_components = []
+selection_reason = "Only P68400 chain; crystallization water, EDO, and sulfate are removed only from the receptor-only derivative."
+
+[[receptors]]
+receptor_id = "3QA0_A"
+pdb_id = "3QA0"
+target = "ck2_alpha"
+uniprot_accession = "P68400"
+author_chain_id = "A"
+structure_state = "apo"
+roles = ["blind_discovery"]
+prepare = true
+water_policy = "remove_all"
+remove_components = ["EDO", "SO4"]
+retain_components = []
+selection_reason = "Chain A and B have equal modeled residue counts; A has the lower mean B-factor and avoids treating crystal copies as independent conformers."
+
+[[receptors]]
+# CK2α′ apo-like 主发现受体。
+receptor_id = "5YF9_X"
+pdb_id = "5YF9"
+target = "ck2_alpha_prime"
+uniprot_accession = "P19784"
+author_chain_id = "X"
+structure_state = "apo_like"
+roles = ["technical_pilot", "blind_discovery"]
+prepare = true
+water_policy = "remove_all"
+remove_components = ["NIO", "SO4"]
+retain_components = []
+selection_reason = "Author chain X has the same modeled residue count as B and a lower mean B-factor; nicotinate, sulfate, and water are removed only from the receptor-only derivative."
+
+[[receptors]]
+receptor_id = "5Y9M_A"
+pdb_id = "5Y9M"
+target = "ck2_alpha_prime"
+uniprot_accession = "P19784"
+author_chain_id = "A"
+structure_state = "apo_like"
+roles = ["blind_discovery"]
+prepare = true
+water_policy = "remove_all"
+remove_components = ["NIO", "SO4"]
+retain_components = []
+selection_reason = "Author chain A has one more modeled residue than X; nicotinate, sulfate, and water are removed only from the receptor-only derivative."
+
+[[receptors]]
+# 以下结构保留为阶段三结合态复核资产，阶段一不机械去配体。
+receptor_id = "4IB5_A"
+pdb_id = "4IB5"
+target = "ck2_alpha"
+uniprot_accession = "P68400"
+author_chain_id = "A"
+structure_state = "cyclic_peptide_bound"
+roles = ["method_control", "bound_state_review", "bound_state_blind_replication"]
+prepare = false
+
+[[receptors]]
+receptor_id = "9FBM_A"
+pdb_id = "9FBM"
+target = "ck2_alpha"
+uniprot_accession = "P68400"
+author_chain_id = "A"
+structure_state = "cyclic_peptidomimetic_bound"
+roles = ["bound_state_review", "bound_state_blind_replication", "subtype_pair"]
+prepare = false
+
+[[receptors]]
+receptor_id = "9FBI_A"
+pdb_id = "9FBI"
+target = "ck2_alpha_prime"
+uniprot_accession = "P19784"
+author_chain_id = "A"
+structure_state = "cyclic_peptidomimetic_bound"
+roles = ["bound_state_review", "bound_state_blind_replication", "subtype_pair"]
+prepare = false
+
+[[receptors]]
+# 全酶条目只作为阶段三后验环境参考，不进入阶段二或结合态复现受体集合。
+receptor_id = "4MD7_E"
+pdb_id = "4MD7"
+target = "ck2_alpha"
+uniprot_accession = "P68400"
+author_chain_id = "E"
+structure_state = "holoenzyme"
+roles = ["full_enzyme_environment"]
+prepare = false
+
+[[receptors]]
+receptor_id = "1JWH_A"
+pdb_id = "1JWH"
+target = "ck2_alpha"
+uniprot_accession = "P68400"
+author_chain_id = "A"
+structure_state = "holoenzyme"
+roles = ["full_enzyme_environment"]
+prepare = false

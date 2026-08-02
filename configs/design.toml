@@ -1,0 +1,37 @@
+[design]
+# 每个设计运行只处理一个有阶段三支持的亚型；两个亚型可以分别建立候选轨道。
+method_id = "paired-local-interface-screen-ref2015-v1"
+qualification_status = "unresolved"
+qualification_report = "unresolved"
+qualification_report_sha256 = "unresolved"
+objective = "single_supported_target"
+seeds = []
+
+[design.sequence]
+# 只固定有明确化学依据的 Cys1/Cys11；内部 2-10 位首轮全部开放。
+mutable_positions = [2, 3, 4, 5, 6, 7, 8, 9, 10]
+allowed_amino_acids = "ADEFGHIKLMNPQRSTVWY"
+# 新出现的 His 与当前 P15 His7 使用同一中性 HIE 解释，并在候选清单中显式记录。
+candidate_histidine_state = "HIE"
+
+[design.screen]
+# 每个 RosettaScripts 任务使用一个进程，在任务层使用 8 个 worker。
+parallel_tasks = 8
+
+[design.analysis]
+# 数值必须由独立对照和技术先导校准，不能依据 P15 候选结果反向调整。
+calibrated = false
+max_positive_median_delta = "unresolved"
+max_positive_worst_delta = "unresolved"
+
+[design.finalists]
+# 与初筛 seed 分离；所有值必须由独立柔性恢复控制冻结。
+parallel_tasks = 8
+seeds = []
+calibrated = false
+min_passed_decoy_fraction = "unresolved"
+min_successful_seeds = "unresolved"
+max_positive_median_ranking_delta = "unresolved"
+max_positive_worst_ranking_delta = "unresolved"
+max_positive_median_interface_delta = "unresolved"
+max_positive_worst_interface_delta = "unresolved"

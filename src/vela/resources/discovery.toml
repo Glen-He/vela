@@ -1,0 +1,37 @@
+[discovery.ensemble]
+# 单次运行的目标由 CLI 显式选择；这里只声明单目标受体集合策略。
+min_receptors_per_target = 2
+allowed_structure_states = ["apo", "apo_like"]
+
+[discovery.qualification]
+# 资格输入和判定值必须由项目配置声明；包内只提供方法运行时默认值。
+
+[discovery.cabsdock]
+# 2025 年环肽 CABS-dock 协议的粗粒化采样规模；阶段二明确关闭全原子重建。
+seed_workers = 1
+mc_annealing = 20
+mc_cycles = 50
+mc_steps = 50
+replicas = 10
+replicas_dtemp = 0.5
+temperature_initial = 2.0
+temperature_final = 1.0
+binding_interactions = 1.0
+protein_restraint_gap = 5
+protein_restraint_min_A = 5.0
+protein_restraint_max_A = 15.0
+filtering_count = 1000
+clustering_medoids = 10
+clustering_iterations = 100
+# 完整 TRAF 只有 Cα；10 Å 是粗粒化位点接触定义，不冒充全原子重原子接触。
+trajectory_contact_ca_threshold_A = 10.0
+# 这里只判断 CABS CA 几何能否进入全原子拓扑重建，不代表二硫键已经形成。
+max_disulfide_ca_distance_A = 8.0
+# 纯技术下限：少于该数量时不运行聚类；它不是 topology 科学资格门槛。
+min_models_for_selection = 10
+# 先用宽松位点边界保留全表面区域，再在位点内按肽 CA RMSD 去除重复姿态。
+selection_contact_jaccard_distance = 0.8
+selection_position_distance_A = 12.0
+pose_clustering_rmsd_A = 4.0
+# 不按能量或簇密度截断低频 pose 簇；每簇交付 medoid 与最低相互作用能代表，
+# 后续由跨 seed 位点支持和阶段三的起点预算收敛计算规模。

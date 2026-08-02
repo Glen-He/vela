@@ -1,0 +1,152 @@
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from vela.config import load_config
+from vela.core.provenance import (
+    JsonValue,
+    atomic_write_json,
+    atomic_write_text,
+    sha256_file,
+    vela_software_identity,
+)
+from vela.discovery.analysis.pose_table import POSE_FIELDS
+from vela.discovery.analysis.workflow import analyze_discovery_run
+from vela.discovery.models import SiteAnalysisSettings
+from vela.validation.models import ValidationError
+from vela.validation.refinement.handoff_plan import build_handoff_tasks
+
+PROJECT_CONFIG = Path(__file__).resolve().parents[2] / "configs"
+
+
+def test_completed_normalized_run_produces_supported_candidate(tmp_path: Path) -> None:
+    run_dir = tmp_path / "outputs" / "runs" / "synthetic"
+    models_dir = run_dir / "models"
+    task_rows: list[dict[str, JsonValue]] = []
+    evidence_rows: list[str] = []
+    for receptor, offset in (("3Q04_A", 0.0), ("3QA0_A", 0.2)):
+        for seed in (11, 22):
+            task_id = f"{receptor}__seed_{seed}"
+            pose_id = f"{task_id}__pose_001"
+            model = models_dir / f"{pose_id}.pdb"
+            atomic_write_text(model, f"MODEL {pose_id}\nEND\n")
+            task_rows.append(
+                {
+                    "task_id": task_id,
+                    "receptor_id": receptor,
+                    "target": "ck2_alpha",
+                    "seed": seed,
+                    "chemistry_id": "p15-test",
+                    "method_id": "synthetic-method",
+                    "adapter_id": "synthetic-adapter",
+                    "status": "completed",
+                }
+            )
+            values = {
+                "task_id": task_id,
+                "pose_id": pose_id,
+                "receptor_id": receptor,
+                "target": "ck2_alpha",
+                "seed": str(seed),
+                "model_path": model.relative_to(run_dir).as_posix(),
+                "model_sha256": sha256_file(model),
+                "model_index": "1",
+                "contact_residues": "A:10;A:11",
+                "local_x_A": str(offset + seed / 100.0),
+                "local_y_A": "0.0",
+                "local_z_A": "0.0",
+                "coordinate_frame_id": "ck2_alpha_reference_v1",
+                "ranking_score": "-10.0",
+                "score_name": "synthetic_score",
+                "qc_status": "passed",
+            }
+            evidence_rows.append("\t".join(values[field] for field in POSE_FIELDS))
+    run_manifest = run_dir / "run_manifest.json"
+    atomic_write_json(
+        run_manifest,
+        {
+            "schema": "vela.discovery-run-manifest/4",
+            "stage": "discovery",
+            "target_id": "ck2_alpha",
+            "status": "planned",
+            "evidence_category": "main_discovery",
+            "known_site_information_used": False,
+            "software": vela_software_identity(),
+            "tasks": [dict(task, status="planned") for task in task_rows],
+        },
+    )
+    atomic_write_json(
+        run_dir / "sampling_manifest.json",
+        {
+            "schema": "vela.discovery-sampling-manifest/4",
+            "stage": "discovery",
+            "target_id": "ck2_alpha",
+            "status": "sampling_completed",
+            "run_manifest_sha256": sha256_file(run_manifest),
+            "software": {
+                "method_version": "1.0",
+                "adapter_version": "1.0",
+            },
+            "tasks": [
+                dict(
+                    task,
+                    execution_status="completed",
+                    selection_status="completed",
+                )
+                for task in task_rows
+            ],
+        },
+    )
+    atomic_write_text(
+        run_dir / "pose_evidence.tsv",
+        "\t".join(POSE_FIELDS) + "\n" + "\n".join(evidence_rows) + "\n",
+    )
+
+    analyze_discovery_run(
+        run_dir=run_dir,
+        settings=SiteAnalysisSettings(
+            contact_jaccard_distance=0.5,
+            position_distance_A=2.0,
+            min_seed_support=2,
+            min_receptor_support=2,
+        ),
+    )
+
+    receptor_report = run_dir / "site_analysis" / "receptor_sites.tsv"
+    candidate_report = run_dir / "site_analysis" / "candidate_sites.tsv"
+    assert receptor_report.is_file()
+    assert candidate_report.is_file()
+    candidate_text = candidate_report.read_text(encoding="utf-8")
+    assert "3Q04_A;3QA0_A" in candidate_text
+    assert "\ttrue\n" in candidate_text
+    assert "pose_ids" in receptor_report.read_text(encoding="utf-8").splitlines()[0]
+
+    config = load_config(PROJECT_CONFIG)
+    tasks = build_handoff_tasks(config=config, discovery_run_dir=run_dir)
+
+    assert len(tasks) == 4
+    assert {task.pose.seed for task in tasks} == {11, 22}
+    assert {task.pose.receptor_id for task in tasks} == {"3Q04_A", "3QA0_A"}
+    assert all(task.candidate_id == "ALPHA_C001" for task in tasks)
+
+    one_pose_config = replace(
+        config,
+        validation=replace(
+            config.validation,
+            handoff=replace(config.validation.handoff, poses_per_receptor_site=1),
+        ),
+    )
+    one_pose_tasks = build_handoff_tasks(
+        config=one_pose_config,
+        discovery_run_dir=run_dir,
+        candidate_ids=("ALPHA_C001",),
+    )
+    assert len(one_pose_tasks) == 2
+
+    with pytest.raises(ValidationError, match="unknown candidate IDs"):
+        build_handoff_tasks(
+            config=config,
+            discovery_run_dir=run_dir,
+            candidate_ids=("OTHER_C001",),
+        )

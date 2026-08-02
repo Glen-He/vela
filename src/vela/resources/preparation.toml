@@ -1,0 +1,20 @@
+[download]
+# 通用网络参数；项目 config 只在确有需要时覆盖。
+coordinate_base_url = "https://files.rcsb.org/download"
+metadata_base_url = "https://data.rcsb.org/rest/v1/core/entry"
+retries = 4
+timeout_seconds = 45.0
+backoff_initial_seconds = 1.0
+backoff_multiplier = 2.0
+chunk_size_bytes = 1048576
+user_agent = "vela/0.1 (structural-biology research workflow)"
+
+[audit.crystal_contacts]
+# 仅用于量化晶体接触，结果仍需人工解释。
+distance_A = 4.5
+min_occupancy = 0.01
+include_hydrogens = false
+
+[preparation.altloc]
+# 最高平均占有率相同时优先选择的标签。
+preferred_label = "A"

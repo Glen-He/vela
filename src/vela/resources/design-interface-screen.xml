@@ -1,0 +1,30 @@
+<ROSETTASCRIPTS>
+  <SCOREFXNS>
+    <ScoreFunction name="design_score" weights="%%score_function%%"/>
+  </SCOREFXNS>
+  <TASKOPERATIONS>
+    <InitializeFromCommandline name="command_line"/>
+    <ReadResfile name="mutation_and_neighbors" filename="%%resfile_path%%"/>
+    <NoRepackDisulfides name="fixed_disulfide"/>
+  </TASKOPERATIONS>
+  <MOVERS>
+    <PackRotamersMover
+      name="local_pack"
+      scorefxn="design_score"
+      task_operations="command_line,mutation_and_neighbors,fixed_disulfide"/>
+    <InterfaceAnalyzerMover
+      name="interface_analysis"
+      scorefxn="design_score"
+      ligandchain="P"
+      pack_input="false"
+      pack_separated="%%pack_separated%%"
+      packstat="false"
+      interface_sc="true"
+      tracer="false"/>
+  </MOVERS>
+  <PROTOCOLS>
+    <Add mover_name="local_pack"/>
+    <Add mover_name="interface_analysis"/>
+  </PROTOCOLS>
+  <OUTPUT scorefxn="design_score"/>
+</ROSETTASCRIPTS>

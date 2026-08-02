@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+
+# Runtime outputs
+/outputs/
+/data/
+/temp/
+/legacy/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Secrets / environment
+.env
+.env.*
+!.env.example

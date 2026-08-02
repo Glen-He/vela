@@ -1,0 +1,46 @@
+[validation]
+# 二硫键几何和界面接触仅用于输入/链配对质控，不代替后续校准的筛选规则。
+min_disulfide_sg_A = 1.8
+max_disulfide_sg_A = 2.3
+interface_contact_A = 4.5
+
+[validation.rosetta]
+# FlexPepDock 正式预算仍受 qualification gate 约束；参数不在代码中隐藏。
+decoys_per_seed = 100
+score_function = "ref2015"
+lowres_preoptimize = false
+
+[validation.cg2all]
+# 阶段二固定产出 CABS CA/SC；此处只定义重建预算和几何保真门槛。
+representation = "CalphaSCModel"
+# 仅作为可复现重建起点；FlexPepDock 未固定的受体 His 后续仍可重排 tautomer。
+receptor_histidine_state = "HIE"
+device = "cpu"
+processes = 2
+batch_size = 1
+chain_break_cutoff_A = 10.0
+max_ca_rmsd_A = 1.0
+
+[validation.handoff]
+# 每个受体 site 优先选择来自不同 seed 的非冗余起点。
+poses_per_receptor_site = 2
+chemistry_seed = 3101
+
+[validation.refinement]
+# 正式候选不施加额外位点引导；局部扰动幅度可以由方法资格结果覆盖。
+prepack_seed = 3201
+random_translation_A = 0.0
+random_rotation_degrees = 0.0
+ranking_score = "reweighted_sc"
+
+[validation.analysis]
+# 所有筛选值必须由当前项目声明的独立控制和技术先导校准后冻结。
+min_interface_contact_pairs = "unresolved"
+min_interface_receptor_residues = "unresolved"
+max_receptor_ca_rmsd_A = "unresolved"
+min_start_contact_overlap = "unresolved"
+max_start_site_displacement_A = "unresolved"
+max_cluster_backbone_rmsd_A = "unresolved"
+min_heavy_atom_distance_A = "unresolved"
+min_refinement_seed_support = "unresolved"
+min_refinement_start_support = "unresolved"
