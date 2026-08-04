@@ -22,10 +22,11 @@ from vela.discovery.analysis.evidence import PoseEvidence
 from vela.discovery.analysis.pose_table import write_pose_evidence
 from vela.discovery.models import DiscoveryError, DiscoveryTask
 from vela.discovery.sampling.cabsdock import (
+    CABS_TASK_RESULT_SCHEMA,
     build_cabsdock_command,
     cabsdock_output_records,
     verify_cabsdock_tool,
-    verify_native_disulfide,
+    verify_disulfide_ca_restraint,
 )
 from vela.discovery.sampling.evidence import (
     CabsDockEvidence,
@@ -92,7 +93,7 @@ def _validate_completed_task(
 ) -> CabsDockEvidence:
     document = _json_document(task_dir / TASK_RESULT_NAME, name="CABS-dock task result")
     if (
-        document.get("schema") != "vela.cabsdock-task-result/4"
+        document.get("schema") != CABS_TASK_RESULT_SCHEMA
         or document.get("execution_status") != "completed"
         or document.get("task_id") != task.task_id
         or document.get("run_manifest_sha256") != run_manifest_sha256
@@ -110,7 +111,11 @@ def _validate_completed_task(
             raise DiscoveryError(f"task output escapes its task directory: {path}")
         if not path.is_file() or sha256_file(path) != expected:
             raise DiscoveryError(f"task output hash mismatch: {path}")
-    verify_native_disulfide(task_dir=task_dir, chemistry=chemistry)
+    verify_disulfide_ca_restraint(
+        task_dir=task_dir,
+        chemistry=chemistry,
+        settings=config.discovery.cabsdock,
+    )
     evidence = _collect_task(
         task=task,
         task_dir=task_dir,
@@ -180,7 +185,11 @@ def run_cabsdock_task(
         raise DiscoveryError(
             f"CABS-dock task failed with exit code {result.returncode}: {task.task_id}"
         )
-    verify_native_disulfide(task_dir=task_dir, chemistry=chemistry)
+    verify_disulfide_ca_restraint(
+        task_dir=task_dir,
+        chemistry=chemistry,
+        settings=config.discovery.cabsdock,
+    )
     evidence = _collect_task(
         task=task,
         task_dir=task_dir,
@@ -209,7 +218,7 @@ def run_cabsdock_task(
     atomic_write_json(
         result_path,
         {
-            "schema": "vela.cabsdock-task-result/4",
+            "schema": CABS_TASK_RESULT_SCHEMA,
             "execution_status": "completed",
             "task_id": task.task_id,
             "run_manifest_sha256": run_manifest_sha256,
@@ -218,8 +227,8 @@ def run_cabsdock_task(
             "software": {
                 "cabsdock_version": tool_version,
                 "cabsdock_source_revision": (config.discovery.cabsdock.source_revision),
-                "cabsdock_patch_sha256": sha256_file(
-                    config.discovery.cabsdock.patch_file
+                "cabsdock_executable_sha256": sha256_file(
+                    config.discovery.cabsdock.executable
                 ),
             },
             "command": list(command),
@@ -422,7 +431,7 @@ def run_cabsdock_sampling(*, config: AppConfig, run_dir: Path) -> None:
     plan_path = run_dir / "run_manifest.json"
     plan = _json_document(plan_path, name="discovery run manifest")
     if (
-        plan.get("schema") != "vela.discovery-run-manifest/4"
+        plan.get("schema") != "vela.discovery-run-manifest/5"
         or plan.get("stage") != "discovery"
         or plan.get("status") != "planned"
         or not is_current_vela_software(plan.get("software"))
@@ -520,7 +529,7 @@ def run_cabsdock_sampling(*, config: AppConfig, run_dir: Path) -> None:
     atomic_write_json(
         run_dir / "sampling_manifest.json",
         {
-            "schema": "vela.discovery-sampling-manifest/4",
+            "schema": "vela.discovery-sampling-manifest/5",
             "stage": "discovery",
             "target_id": target_id,
             "status": "sampling_completed",
@@ -530,8 +539,8 @@ def run_cabsdock_sampling(*, config: AppConfig, run_dir: Path) -> None:
                 "method_version": tool_version,
                 "adapter_version": version("vela"),
                 "cabsdock_source_revision": (config.discovery.cabsdock.source_revision),
-                "cabsdock_patch_sha256": sha256_file(
-                    config.discovery.cabsdock.patch_file
+                "cabsdock_executable_sha256": sha256_file(
+                    config.discovery.cabsdock.executable
                 ),
             },
             "representation": "CABS coarse-grained CA/SC",

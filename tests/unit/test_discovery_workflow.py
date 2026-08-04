@@ -11,13 +11,63 @@ from vela.core.provenance import (
     sha256_file,
     vela_software_identity,
 )
-from vela.discovery.analysis.pose_table import POSE_FIELDS
+from vela.discovery.analysis.pose_table import POSE_FIELDS, read_pose_evidence
 from vela.discovery.analysis.workflow import analyze_discovery_run
 from vela.discovery.models import SiteAnalysisSettings
 from vela.validation.models import ValidationError
 from vela.validation.refinement.handoff_plan import build_handoff_tasks
 
 PROJECT_CONFIG = Path(__file__).resolve().parents[2] / "configs"
+
+
+def test_pose_table_hashes_each_shared_model_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    model = run_dir / "models" / "shared.pdb"
+    atomic_write_text(model, "MODEL shared\nEND\n")
+    digest = sha256_file(model)
+    rows: list[str] = []
+    for index in (1, 2):
+        values = {
+            "task_id": "task_001",
+            "pose_id": f"pose_{index:03d}",
+            "receptor_id": "3Q04_A",
+            "target": "ck2_alpha",
+            "seed": "120623",
+            "model_path": model.relative_to(run_dir).as_posix(),
+            "model_sha256": digest,
+            "model_index": str(index),
+            "contact_residues": "A:10",
+            "local_x_A": "0.0",
+            "local_y_A": "0.0",
+            "local_z_A": "0.0",
+            "coordinate_frame_id": "3Q04_A",
+            "ranking_score": "-1.0",
+            "score_name": "interaction_energy",
+            "qc_status": "passed",
+        }
+        rows.append("\t".join(values[field] for field in POSE_FIELDS))
+    table = run_dir / "pose_evidence.tsv"
+    atomic_write_text(
+        table,
+        "\t".join(POSE_FIELDS) + "\n" + "\n".join(rows) + "\n",
+    )
+    calls = 0
+
+    def counting_sha256(path: Path) -> str:
+        nonlocal calls
+        calls += 1
+        return digest
+
+    monkeypatch.setattr(
+        "vela.discovery.analysis.pose_table.sha256_file", counting_sha256
+    )
+
+    poses = read_pose_evidence(path=table, run_dir=run_dir)
+
+    assert len(poses) == 2
+    assert calls == 1
 
 
 def test_completed_normalized_run_produces_supported_candidate(tmp_path: Path) -> None:
@@ -66,7 +116,7 @@ def test_completed_normalized_run_produces_supported_candidate(tmp_path: Path) -
     atomic_write_json(
         run_manifest,
         {
-            "schema": "vela.discovery-run-manifest/4",
+            "schema": "vela.discovery-run-manifest/5",
             "stage": "discovery",
             "target_id": "ck2_alpha",
             "status": "planned",
@@ -79,7 +129,7 @@ def test_completed_normalized_run_produces_supported_candidate(tmp_path: Path) -
     atomic_write_json(
         run_dir / "sampling_manifest.json",
         {
-            "schema": "vela.discovery-sampling-manifest/4",
+            "schema": "vela.discovery-sampling-manifest/5",
             "stage": "discovery",
             "target_id": "ck2_alpha",
             "status": "sampling_completed",
@@ -123,7 +173,11 @@ def test_completed_normalized_run_produces_supported_candidate(tmp_path: Path) -
     assert "pose_ids" in receptor_report.read_text(encoding="utf-8").splitlines()[0]
 
     config = load_config(PROJECT_CONFIG)
-    tasks = build_handoff_tasks(config=config, discovery_run_dir=run_dir)
+    tasks = build_handoff_tasks(
+        config=config,
+        discovery_run_dir=run_dir,
+        candidate_ids=("ALPHA_C001",),
+    )
 
     assert len(tasks) == 4
     assert {task.pose.seed for task in tasks} == {11, 22}
@@ -149,4 +203,10 @@ def test_completed_normalized_run_produces_supported_candidate(tmp_path: Path) -
             config=config,
             discovery_run_dir=run_dir,
             candidate_ids=("OTHER_C001",),
+        )
+    with pytest.raises(ValidationError, match="explicit candidate ID"):
+        build_handoff_tasks(
+            config=config,
+            discovery_run_dir=run_dir,
+            candidate_ids=(),
         )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 from dataclasses import dataclass
+from itertools import combinations
 from pathlib import Path
 
 from vela.config import AppConfig
@@ -15,8 +16,9 @@ from vela.core.provenance import (
     utc_now,
 )
 from vela.core.typed_data import object_list, object_mapping
+from vela.discovery.analysis.cluster_engine import normalized_site_distance
 from vela.discovery.analysis.clustering import analyze_sites
-from vela.discovery.analysis.evidence import PoseEvidence, ReceptorSite
+from vela.discovery.analysis.evidence import PoseEvidence
 from vela.discovery.analysis.pose_table import read_pose_evidence
 from vela.discovery.models import DiscoveryError
 from vela.discovery.qualification.planning import (
@@ -24,6 +26,11 @@ from vela.discovery.qualification.planning import (
     TARGET_PILOT,
     qualification_decision_rules,
     topology_calibration_record,
+)
+from vela.discovery.qualification.schemas import (
+    PLAN_SCHEMA,
+    REPORT_SCHEMA,
+    SAMPLING_SCHEMA,
 )
 
 SELECTED_EVIDENCE = "selected_candidates"
@@ -39,6 +46,7 @@ class RecoveryMetric:
     seed: int
     qc_status: str
     ligand_ca_rmsd_A: float
+    ligand_centroid_distance_A: float
     native_receptor_contact_fraction: float
 
 
@@ -67,6 +75,7 @@ def _recovery_metrics(path: Path) -> tuple[RecoveryMetric, ...]:
                     seed=int(row["seed"]),
                     qc_status=row["qc_status"],
                     ligand_ca_rmsd_A=float(row["ligand_ca_rmsd_A"]),
+                    ligand_centroid_distance_A=float(row["ligand_centroid_distance_A"]),
                     native_receptor_contact_fraction=float(
                         row["native_receptor_contact_fraction"]
                     ),
@@ -156,7 +165,7 @@ def _shared_control_paths(*, config: AppConfig, raw: object) -> dict[str, Path] 
         control.get("candidate_selection"), name="shared candidate selection"
     )
     if (
-        report.get("schema") != "vela.discovery-qualification-report/4"
+        report.get("schema") != REPORT_SCHEMA
         or report.get("status") != "qualified"
         or selection.get("passed") is not True
         or not is_current_vela_software(plan.get("software"))
@@ -165,19 +174,93 @@ def _shared_control_paths(*, config: AppConfig, raw: object) -> dict[str, Path] 
     return paths
 
 
-def _best_native_cluster(
+def best_native_coherent_site_evidence(
     *,
-    sites: tuple[ReceptorSite, ...],
     recovered: set[str],
     poses: dict[str, PoseEvidence],
+    contact_limit: float,
+    position_limit: float,
 ) -> tuple[int, float]:
-    best = (0, 0.0)
-    for site in sites:
-        recovered_members = recovered & set(site.pose_ids)
-        seeds = {poses[pose_id].seed for pose_id in recovered_members}
-        precision = len(recovered_members) / len(site.pose_ids)
-        best = max(best, (len(seeds), precision))
-    return best
+    """求跨 seed 的两两相容 native 集合, 避免星形邻域虚增支持度。"""
+    unknown = recovered - set(poses)
+    if unknown:
+        raise DiscoveryError("native recovery references unknown poses")
+    if not recovered:
+        return 0, 0.0
+
+    compatibility: dict[tuple[str, str], bool] = {}
+
+    def compatible(first_id: str, second_id: str) -> bool:
+        if first_id == second_id:
+            return True
+        key = (first_id, second_id) if first_id < second_id else (second_id, first_id)
+        cached = compatibility.get(key)
+        if cached is not None:
+            return cached
+        first = poses[first_id]
+        second = poses[second_id]
+        result = (
+            normalized_site_distance(
+                first_contacts=first.contact_residues,
+                first_position=first.local_position,
+                second_contacts=second.contact_residues,
+                second_position=second.local_position,
+                contact_limit=contact_limit,
+                position_limit=position_limit,
+            )
+            <= 1.0
+        )
+        compatibility[key] = result
+        return result
+
+    by_seed: dict[int, tuple[str, ...]] = {}
+    for seed in sorted({poses[pose_id].seed for pose_id in recovered}):
+        by_seed[seed] = tuple(
+            sorted(pose_id for pose_id in recovered if poses[pose_id].seed == seed)
+        )
+
+    all_pose_ids = tuple(sorted(poses))
+    seeds = tuple(sorted(by_seed))
+    for support in range(len(seeds), 0, -1):
+        for seed_subset in combinations(seeds, support):
+            ordered_seeds = tuple(
+                sorted(seed_subset, key=lambda seed: len(by_seed[seed]))
+            )
+
+            def search(
+                index: int,
+                chosen: tuple[str, ...],
+                seed_order: tuple[int, ...] = ordered_seeds,
+            ) -> tuple[str, ...] | None:
+                if index == len(seed_order):
+                    return chosen
+                for pose_id in by_seed[seed_order[index]]:
+                    extended = (*chosen, pose_id)
+                    if not all(compatible(member, pose_id) for member in chosen):
+                        continue
+                    if any(
+                        not any(
+                            all(compatible(member, option) for member in extended)
+                            for option in by_seed[remaining_seed]
+                        )
+                        for remaining_seed in seed_order[index + 1 :]
+                    ):
+                        continue
+                    result = search(index + 1, extended, seed_order)
+                    if result is not None:
+                        return result
+                return None
+
+            chosen = search(0, ())
+            if chosen is None:
+                continue
+            neighborhood = tuple(
+                pose_id
+                for pose_id in all_pose_ids
+                if all(compatible(member, pose_id) for member in chosen)
+            )
+            return support, len(chosen) / len(neighborhood)
+    return 0, 0.0
 
 
 def _sampling_task_rows(
@@ -218,11 +301,22 @@ def _optional_nonnegative_number(value: object, *, name: str) -> float | None:
     return float(value)
 
 
-def _is_recovered(metric: RecoveryMetric, *, config: AppConfig) -> bool:
+def _pose_is_recovered(metric: RecoveryMetric, *, config: AppConfig) -> bool:
     rules = config.discovery.qualification
     return (
         metric.qc_status == "passed"
         and metric.ligand_ca_rmsd_A <= rules.max_native_ligand_rmsd_A
+        and metric.native_receptor_contact_fraction
+        >= rules.min_native_receptor_contact_fraction
+    )
+
+
+def _site_is_recovered(metric: RecoveryMetric, *, config: AppConfig) -> bool:
+    rules = config.discovery.qualification
+    return (
+        metric.qc_status == "passed"
+        and metric.ligand_centroid_distance_A
+        <= rules.max_native_site_centroid_distance_A
         and metric.native_receptor_contact_fraction
         >= rules.min_native_receptor_contact_fraction
     )
@@ -250,9 +344,9 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
     sampling = _document(sampling_path, name="qualification sampling manifest")
     target_id = plan.get("target_id")
     if (
-        plan.get("schema") != "vela.discovery-qualification-plan/4"
+        plan.get("schema") != PLAN_SCHEMA
         or not is_current_vela_software(plan.get("software"))
-        or sampling.get("schema") != "vela.discovery-qualification-sampling/4"
+        or sampling.get("schema") != SAMPLING_SCHEMA
         or sampling.get("qualification_plan_sha256") != sha256_file(plan_path)
         or sampling.get("target_id") != target_id
         or not isinstance(target_id, str)
@@ -329,18 +423,26 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
     if baseline_pose_ids != set(baseline_by_pose):
         raise DiscoveryError("baseline recovery metrics do not match baseline poses")
 
-    selection_recovered = {
+    selection_pose_recovered = {
         metric.pose_id
         for metric in selected_metrics
-        if _is_recovered(metric, config=config)
+        if _pose_is_recovered(metric, config=config)
+    }
+    selection_site_recovered = {
+        metric.pose_id
+        for metric in selected_metrics
+        if _site_is_recovered(metric, config=config)
     }
     baseline_recovered = {
         metric.pose_id
         for metric in baseline_metrics
-        if _is_recovered(metric, config=config)
+        if _pose_is_recovered(metric, config=config)
     }
     selection_seeds = sorted(
-        {selected_by_pose[pose_id].seed for pose_id in selection_recovered}
+        {selected_by_pose[pose_id].seed for pose_id in selection_site_recovered}
+    )
+    selection_pose_seeds = sorted(
+        {selected_by_pose[pose_id].seed for pose_id in selection_pose_recovered}
     )
     baseline_seeds = sorted(
         {baseline_by_pose[pose_id].seed for pose_id in baseline_recovered}
@@ -409,6 +511,11 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
         for row in control_rows
     )
     native_filter_rows: list[tuple[dict[str, object], dict[str, object]]] = []
+    selected_model_budget = (
+        config.discovery.cabsdock.max_sites_per_task
+        * config.discovery.cabsdock.max_pose_clusters_per_site
+        * 2
+    )
     for row in control_rows:
         try:
             audit = object_mapping(
@@ -418,6 +525,16 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
             raise DiscoveryError("control task lacks its native filter audit") from exc
         if audit.get("qualification_gate") is not False:
             raise DiscoveryError("native filter audit must remain descriptive")
+        selected_count = _nonnegative_integer(
+            row.get("selected_model_count"), name="selected_model_count"
+        )
+        if (
+            row.get("selected_model_budget") != selected_model_budget
+            or selected_count > selected_model_budget
+        ):
+            raise DiscoveryError(
+                "control candidate selection exceeded its frozen budget"
+            )
         native_filter_rows.append((row, audit))
     full_native_recovered = sum(
         _nonnegative_integer(
@@ -487,16 +604,19 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
         raise DiscoveryError(
             "qualification site analysis parameters must be frozen before execution"
         )
-    control_sites = analyze_sites(
-        poses=control_poses,
-        settings=control_target.analysis,
-    )
     pilot_sites = analyze_sites(poses=pilot_poses, settings=target.analysis)
     control_pose_by_id = {pose.pose_id: pose for pose in control_poses}
-    native_cluster_support, native_cluster_precision = _best_native_cluster(
-        sites=control_sites.receptor_sites,
-        recovered=selection_recovered,
-        poses=control_pose_by_id,
+    contact_limit = control_target.analysis.contact_jaccard_distance
+    position_limit = control_target.analysis.position_distance_A
+    if contact_limit is None or position_limit is None:
+        raise DiscoveryError("control site distance thresholds are unresolved")
+    native_neighborhood_seed_support, native_neighborhood_precision = (
+        best_native_coherent_site_evidence(
+            recovered=selection_site_recovered,
+            poses=control_pose_by_id,
+            contact_limit=contact_limit,
+            position_limit=position_limit,
+        )
     )
     pilot_supported = tuple(
         site for site in pilot_sites.receptor_sites if site.supported
@@ -504,10 +624,19 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
     pilot_max_seed_support = max(
         (len(site.supporting_seeds) for site in pilot_supported), default=0
     )
-    sampling_passed = len(pool_seeds) >= rules.min_successful_control_seeds
-    selection_passed = len(selection_seeds) >= rules.min_successful_control_seeds
+    if not set(selection_seeds).issubset(pool_seeds):
+        raise DiscoveryError("selected native seeds are absent from the sampling pool")
+    selection_seed_recall_fraction = (
+        len(selection_seeds) / len(pool_seeds) if pool_seeds else 0.0
+    )
+    sampling_passed = len(pool_seeds) >= rules.min_native_sampling_seed_support
+    selection_passed = (
+        bool(control_poses)
+        and selection_seed_recall_fraction
+        >= rules.min_selection_native_seed_recall_fraction
+    )
     site_validation_passed = (
-        native_cluster_support >= rules.min_successful_control_seeds
+        native_neighborhood_seed_support >= rules.min_native_site_seed_support
     )
     topology_calibration = topology_calibration_record(config)
     if plan.get("topology_calibration") != topology_calibration:
@@ -519,6 +648,8 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
     expected_target_matched = target_id == rules.control_target_id
     scope_valid = (
         control_scope.get("control_target_id") == rules.control_target_id
+        and control_scope.get("control_receptor_id") == rules.control_receptor_id
+        and control_scope.get("native_bound_state_id") == rules.control_bound_state_id
         and control_scope.get("requested_target_id") == target_id
         and control_scope.get("target_matched") is expected_target_matched
     )
@@ -530,7 +661,9 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
     if not sampling_passed:
         failure_reasons.append("insufficient_native_recovery_in_sampling_pool")
     if not selection_passed:
-        failure_reasons.append("insufficient_native_recovery_in_selected_candidates")
+        failure_reasons.append(
+            "insufficient_native_site_recovery_in_selected_candidates"
+        )
     if not control_poses:
         failure_reasons.append("control_candidate_selection_empty")
     if not site_validation_passed:
@@ -552,7 +685,7 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
     atomic_write_json(
         report_path,
         {
-            "schema": "vela.discovery-qualification-report/4",
+            "schema": REPORT_SCHEMA,
             "stage": "discovery_qualification",
             "status": status,
             "failure_reasons": failure_reasons,
@@ -580,6 +713,8 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
             ),
             "control_scope": {
                 "control_target_id": rules.control_target_id,
+                "control_receptor_id": rules.control_receptor_id,
+                "native_bound_state_id": rules.control_bound_state_id,
                 "requested_target_id": target_id,
                 "target_matched": target_id == rules.control_target_id,
             },
@@ -587,10 +722,19 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
             "verified_decision_rules": decision_rules,
             "control_recovery": {
                 "max_native_ligand_rmsd_A": rules.max_native_ligand_rmsd_A,
+                "max_native_site_centroid_distance_A": (
+                    rules.max_native_site_centroid_distance_A
+                ),
                 "min_native_receptor_contact_fraction": (
                     rules.min_native_receptor_contact_fraction
                 ),
-                "min_successful_seeds": rules.min_successful_control_seeds,
+                "min_native_sampling_seed_support": (
+                    rules.min_native_sampling_seed_support
+                ),
+                "min_native_site_seed_support": rules.min_native_site_seed_support,
+                "min_selection_native_seed_recall_fraction": (
+                    rules.min_selection_native_seed_recall_fraction
+                ),
                 "topology_feasibility": {
                     "qualification_gate": False,
                     "task_count": len(control_rows),
@@ -654,20 +798,37 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
                 "candidate_selection": {
                     "passed": selection_passed,
                     "model_count": len(control_poses),
-                    "recovered_model_count": len(selection_recovered),
+                    "maximum_models_per_task": selected_model_budget,
+                    "site_recovered_model_count": len(selection_site_recovered),
                     "successful_seeds": selection_seeds,
                     "successful_seed_count": len(selection_seeds),
+                    "sampling_pool_seed_recall_fraction": round(
+                        selection_seed_recall_fraction, 6
+                    ),
+                    "missing_sampling_pool_seeds": sorted(
+                        set(pool_seeds) - set(selection_seeds)
+                    ),
                     "best_ligand_ca_rmsd_A": selected_best_rmsd,
                     "best_native_receptor_contact_fraction": selected_best_contact,
+                    "exact_pose_recovery_is_qualification_gate": False,
+                    "exact_pose_recovered_model_count": len(selection_pose_recovered),
+                    "exact_pose_successful_seeds": selection_pose_seeds,
                 },
                 "frozen_site_analysis": {
                     "passed": site_validation_passed,
-                    "native_cluster_seed_support": native_cluster_support,
-                    "native_cluster_precision": round(native_cluster_precision, 6),
+                    "method": "maximum_pairwise_compatible_native_seed_set",
+                    "native_neighborhood_seed_support": (
+                        native_neighborhood_seed_support
+                    ),
+                    "native_neighborhood_precision": round(
+                        native_neighborhood_precision, 6
+                    ),
                     "qualification_gate": True,
                 },
                 "cabsdock_top10_baseline": {
-                    "passed": len(baseline_seeds) >= rules.min_successful_control_seeds,
+                    "passed": (
+                        len(baseline_seeds) >= rules.min_native_sampling_seed_support
+                    ),
                     "model_count": len(control_baseline),
                     "recovered_model_count": len(baseline_recovered),
                     "successful_seeds": baseline_seeds,

@@ -59,6 +59,7 @@ class TopologyReconstructionAssessment:
     receptor_contact_retention_fraction: float
     disulfide_sg_distances_A: tuple[float, ...]
     min_interchain_heavy_atom_distance_A: float
+    min_nonlocal_peptide_heavy_atom_distance_A: float
     failures: tuple[str, ...]
 
     @property
@@ -295,6 +296,41 @@ def write_cg2all_input(
     )
 
 
+def write_peptide_site_coordinate_constraints(
+    *,
+    source_path: Path,
+    destination: Path,
+    chemistry: ChemistryDefinition,
+    flat_width_A: float,
+    standard_deviation_A: float,
+) -> int:
+    """约束肽 C-alpha 留在重建起点附近。平底区仍允许环骨架调整。"""
+    if flat_width_A < 0 or standard_deviation_A <= 0:
+        raise ValidationError("site coordinate constraint parameters are invalid")
+    receptor, peptide = _source_chains(
+        path=source_path,
+        model_index=1,
+        peptide_sequence=chemistry.sequence,
+    )
+    if _named_atom(receptor[0], "CA") is None:
+        raise ValidationError("site coordinate constraint reference lacks CA")
+    receptor_count = len(receptor)
+    lines: list[str] = []
+    for peptide_index, residue in enumerate(peptide, 1):
+        atom = _named_atom(residue, "CA")
+        if atom is None:
+            raise ValidationError("site coordinate constraint peptide lacks CA")
+        lines.append(
+            "CoordinateConstraint "
+            f"CA {receptor_count + peptide_index} CA 1 "
+            f"{atom.pos.x:.6f} {atom.pos.y:.6f} {atom.pos.z:.6f} "
+            "FLAT_HARMONIC 0.0 "
+            f"{standard_deviation_A:.6f} {flat_width_A:.6f}\n"
+        )
+    atomic_write_text(destination, "".join(lines))
+    return len(lines)
+
+
 def _ca_positions(
     *, path: Path, peptide_sequence: str
 ) -> tuple[tuple[gemmi.Position, ...], tuple[gemmi.Position, ...]]:
@@ -443,6 +479,7 @@ def assess_topology_reconstruction(
     min_disulfide_sg_A: float,
     max_disulfide_sg_A: float,
     min_interchain_heavy_atom_distance_A: float,
+    min_nonlocal_peptide_heavy_atom_distance_A: float,
     contact_ca_threshold_A: float,
     max_peptide_internal_ca_rmsd_A: float,
     max_ligand_centroid_displacement_A: float,
@@ -539,6 +576,35 @@ def assess_topology_reconstruction(
     )
     if minimum_distance < min_interchain_heavy_atom_distance_A:
         failures.append("severe_interchain_heavy_atom_overlap")
+    disulfide_endpoint_pairs = {
+        frozenset((bond.first - 1, bond.second - 1))
+        for bond in chemistry.disulfide_bonds
+    }
+    peptide_heavy_atoms = tuple(
+        (residue_index, atom)
+        for residue_index, residue in enumerate(peptide)
+        for atom in residue
+        if atom.element.name != "H"
+    )
+    nonlocal_distances = tuple(
+        first_atom.pos.dist(second_atom.pos)
+        for first_index, first_atom in peptide_heavy_atoms
+        for second_index, second_atom in peptide_heavy_atoms
+        if first_index < second_index
+        and second_index - first_index > 1
+        and not (
+            first_atom.name == "SG"
+            and second_atom.name == "SG"
+            and frozenset((first_index, second_index)) in disulfide_endpoint_pairs
+        )
+    )
+    if not nonlocal_distances:
+        raise ValidationError(
+            "topology reconstruction has no nonlocal peptide heavy-atom pairs"
+        )
+    minimum_nonlocal_peptide_distance = min(nonlocal_distances)
+    if minimum_nonlocal_peptide_distance < min_nonlocal_peptide_heavy_atom_distance_A:
+        failures.append("severe_nonlocal_peptide_heavy_atom_overlap")
     return TopologyReconstructionAssessment(
         receptor_ca_rmsd_A=receptor_alignment.rmsd,
         peptide_pose_ca_rmsd_A=peptide_pose_rmsd,
@@ -547,6 +613,7 @@ def assess_topology_reconstruction(
         receptor_contact_retention_fraction=contact_retention,
         disulfide_sg_distances_A=tuple(sg_distances),
         min_interchain_heavy_atom_distance_A=minimum_distance,
+        min_nonlocal_peptide_heavy_atom_distance_A=(minimum_nonlocal_peptide_distance),
         failures=tuple(dict.fromkeys(failures)),
     )
 

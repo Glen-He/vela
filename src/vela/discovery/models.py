@@ -149,12 +149,14 @@ class TopologyCalibrationSettings:
     min_success_fraction_per_stratum: float
     min_successful_seeds_per_stratum: int
     min_interchain_heavy_atom_distance_A: float
+    min_nonlocal_peptide_heavy_atom_distance_A: float
     max_peptide_internal_ca_rmsd_A: float
     max_ligand_centroid_displacement_A: float
     contact_ca_threshold_A: float
     min_receptor_contact_retention_fraction: float
-    max_refine_fa_rep_per_residue: float
-    max_refine_backbone_strain_per_residue: float
+    site_coordinate_constraint_flat_width_A: float
+    site_coordinate_constraint_sd_A: float
+    site_coordinate_constraint_weight: float
 
     def __post_init__(self) -> None:
         if not self.candidate_ca_thresholds_A:
@@ -195,6 +197,10 @@ class TopologyCalibrationSettings:
             raise DiscoveryError(
                 "topology calibration interchain distance must be positive"
             )
+        if self.min_nonlocal_peptide_heavy_atom_distance_A <= 0:
+            raise DiscoveryError(
+                "topology calibration nonlocal peptide distance must be positive"
+            )
         if self.max_peptide_internal_ca_rmsd_A <= 0:
             raise DiscoveryError(
                 "topology calibration peptide internal RMSD must be positive"
@@ -211,13 +217,17 @@ class TopologyCalibrationSettings:
             raise DiscoveryError(
                 "topology calibration contact retention must be in (0, 1]"
             )
-        if self.max_refine_fa_rep_per_residue <= 0:
+        if self.site_coordinate_constraint_flat_width_A < 0:
             raise DiscoveryError(
-                "topology calibration fa_rep per residue must be positive"
+                "topology calibration site constraint flat width must not be negative"
             )
-        if self.max_refine_backbone_strain_per_residue <= 0:
+        if self.site_coordinate_constraint_sd_A <= 0:
             raise DiscoveryError(
-                "topology calibration backbone strain per residue must be positive"
+                "topology calibration site constraint standard deviation must be positive"
+            )
+        if self.site_coordinate_constraint_weight <= 0:
+            raise DiscoveryError(
+                "topology calibration site constraint weight must be positive"
             )
 
     @property
@@ -235,11 +245,15 @@ class DiscoveryQualificationSettings:
 
     seeds: tuple[int, ...]
     control_bound_state_id: str
+    control_receptor_id: str
     control_target_id: str
     control_secondary_structure: str
     max_native_ligand_rmsd_A: float
+    max_native_site_centroid_distance_A: float
     min_native_receptor_contact_fraction: float
-    min_successful_control_seeds: int
+    min_native_sampling_seed_support: int
+    min_native_site_seed_support: int
+    min_selection_native_seed_recall_fraction: float
     topology_calibration_status: str
     topology_calibration_report: Path | None
     topology_calibration_report_sha256: str | None
@@ -252,6 +266,7 @@ class DiscoveryQualificationSettings:
             raise DiscoveryError("qualification seeds must not be negative")
         for name, value in (
             ("control_bound_state_id", self.control_bound_state_id),
+            ("control_receptor_id", self.control_receptor_id),
             ("control_target_id", self.control_target_id),
         ):
             if not value.strip():
@@ -262,13 +277,21 @@ class DiscoveryQualificationSettings:
             raise DiscoveryError("control_secondary_structure is invalid")
         if self.max_native_ligand_rmsd_A <= 0:
             raise DiscoveryError("max_native_ligand_rmsd_A must be positive")
+        if self.max_native_site_centroid_distance_A <= 0:
+            raise DiscoveryError("max_native_site_centroid_distance_A must be positive")
         if not 0.0 < self.min_native_receptor_contact_fraction <= 1.0:
             raise DiscoveryError(
                 "min_native_receptor_contact_fraction must be in (0, 1]"
             )
-        if not 1 <= self.min_successful_control_seeds <= len(self.seeds):
+        for name, value in (
+            ("min_native_sampling_seed_support", self.min_native_sampling_seed_support),
+            ("min_native_site_seed_support", self.min_native_site_seed_support),
+        ):
+            if not 1 <= value <= len(self.seeds):
+                raise DiscoveryError(f"{name} must fit the qualification seed count")
+        if not 0.0 < self.min_selection_native_seed_recall_fraction <= 1.0:
             raise DiscoveryError(
-                "min_successful_control_seeds must fit the qualification seed count"
+                "min_selection_native_seed_recall_fraction must be in (0, 1]"
             )
         if self.topology_calibration_status not in {
             UNRESOLVED,
@@ -321,7 +344,6 @@ class CabsDockSettings:
     executable: Path
     source_dir: Path
     source_revision: str
-    patch_file: Path
     seed_workers: int
     peptide_secondary_structure: str
     mc_annealing: int
@@ -339,11 +361,15 @@ class CabsDockSettings:
     clustering_medoids: int
     clustering_iterations: int
     trajectory_contact_ca_threshold_A: float
-    max_disulfide_ca_distance_A: float
+    disulfide_ca_restraint_distance_A: float
+    disulfide_ca_restraint_weight: float
+    max_reconstructable_disulfide_ca_distance_A: float
     min_models_for_selection: int
     selection_contact_jaccard_distance: float
     selection_position_distance_A: float
     pose_clustering_rmsd_A: float
+    max_sites_per_task: int
+    max_pose_clusters_per_site: int
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[0-9a-f]{40,64}", self.source_revision):
@@ -361,6 +387,8 @@ class CabsDockSettings:
             ("clustering_iterations", self.clustering_iterations),
             ("seed_workers", self.seed_workers),
             ("min_models_for_selection", self.min_models_for_selection),
+            ("max_sites_per_task", self.max_sites_per_task),
+            ("max_pose_clusters_per_site", self.max_pose_clusters_per_site),
         )
         for name, value in positive_integers:
             if value < 1:
@@ -376,13 +404,22 @@ class CabsDockSettings:
                 "trajectory_contact_ca_threshold_A",
                 self.trajectory_contact_ca_threshold_A,
             ),
-            ("max_disulfide_ca_distance_A", self.max_disulfide_ca_distance_A),
+            (
+                "disulfide_ca_restraint_distance_A",
+                self.disulfide_ca_restraint_distance_A,
+            ),
+            (
+                "max_reconstructable_disulfide_ca_distance_A",
+                self.max_reconstructable_disulfide_ca_distance_A,
+            ),
             ("selection_position_distance_A", self.selection_position_distance_A),
             ("pose_clustering_rmsd_A", self.pose_clustering_rmsd_A),
         )
         for name, value in positive_numbers:
             if value <= 0:
                 raise DiscoveryError(f"{name} must be positive")
+        if not 0.0 < self.disulfide_ca_restraint_weight <= 1.0:
+            raise DiscoveryError("disulfide_ca_restraint_weight must be in (0, 1]")
         if self.temperature_initial < self.temperature_final:
             raise DiscoveryError(
                 "temperature_initial must not be below temperature_final"

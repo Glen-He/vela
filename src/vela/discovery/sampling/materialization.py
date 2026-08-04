@@ -60,6 +60,7 @@ def materialize_cabs_frames(
         )
     selection_path = task_dir / "output_data" / "trajectory_candidate_frames.json"
     output_path = task_dir / "output_pdbs" / "trajectory_candidates.pdb"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_json(
         selection_path,
         {

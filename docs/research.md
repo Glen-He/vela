@@ -71,8 +71,8 @@ FlexPepDock 精修属于后续步骤，不属于粗粒化全局搜索本身。�
 [公开 Top-10 数据仓库](https://github.com/ZalewskiMa/CABSdock-cyclic)和
 [CABS-dock standalone 方法论文](https://doi.org/10.1093/bioinformatics/btz185)。
 
-本项目因此只让阶段二负责“全表面粗粒化 site 发现”：P15 二硫键由 CABS-dock 原生
-SG 距离 restraint 表达，但该 restraint 是能量惩罚项，不是全原子共价键。阶段二检查
+本项目因此只让阶段二负责“全表面粗粒化 site 发现”：P15 二硫键由 CABS-dock 官方
+Cα 距离 restraint 表达，但该 restraint 是能量惩罚项，不是全原子共价键。阶段二检查
 Cys Cα 距离时只使用 `topology_feasible`，不再把它写成“二硫键已经闭合”。正式候选
 直接从完整 10,000 帧 TRAF 中过滤拓扑可行且接触受体的模型，再执行 site-first、
 pose-second 去重；上游 Top-1000 和 Top-10 medoid 仅作为能量过滤与公开流程基线。
@@ -99,22 +99,46 @@ CABS 任务正常结束，但仍按 4 Å 和 Top-1000 合同分析，最终为 `
 是失败协议的不可变历史记录，不能在修改阈值和选择算法后补写成通过。
 
 对两批完整 TRAF 的只读 5.5 Å 诊断显示：开发批和旧正式批都各有 5/8 seed 采样到
-5.5 Å 内模型、4/8 seed 同时满足 7 Å 拓扑可行性；但 Top-1000 各自只保留 1/8，说明
-主要丢失发生在 CABS 相互作用能过滤，而不是完整轨迹没有信号。进一步只在开发 seed
+5.5 Å 内模型、4/8 seed 同时满足 7 Å 拓扑可行性；Top-1000 各自只有 1/8 seed 保留
+单独的 L-RMSD 信号，并且 0/8 同时满足当前拓扑与接触组合门槛，说明
+主要丢失发生在 CABS 相互作用能过滤，而不是完整轨迹没有信号。进一步只在旧开发 seed
 比较候选覆盖后发现，每 site 截取 8、16 甚至 32 个 pose 簇仍会丢失已采样的近天然
 低频 basin；保留全部非冗余 pose 簇后，4 个具备合格采样的开发 seed 全部保住该 basin。
 
-因此当前合同不再配置任意的 `max_pose_clusters_per_site`。每个 pose 簇保存几何 medoid
-和最低 CABS 相互作用能模型，重复时只保存一次；真正的资源收敛发生在跨 seed 位点
-支持之后，阶段三每个受体 site 只选择两个不同 seed 起点。`120639..120646` 已参与
-根因诊断，当前验证改用未查看的 `120647..120654`。native 坐标只由冻结候选后的
-qualification evaluator 读取，候选收集接口本身没有 native 输入。
+“保留全部 pose 簇”诊断虽然能找回旧开发批的低频 basin，但每个 seed 交付
+1,456–1,833 个控制候选，整批超过一万个结构，使选择召回失去区分度，也无法形成
+生产交付预算。因此当前合同改为每任务最多 64 个 site、每 site 最多 4 个 pose 簇、
+每簇最多 2 个代表，即 512 个候选；site 与 pose 簇都先按人口、再按最低 CABS
+相互作用能和稳定身份排序。`120639..120654` 均已参与旧协议运行或根因诊断，不能
+作为新协议的留出验证。native 坐标只由冻结候选后的 qualification evaluator 读取，
+候选收集接口本身没有 native 输入。
 
-### 全原子拓扑可恢复性校准结果
+新 CA 约束协议的开发运行
+`outputs/discovery/qualifications/ck2-alpha-ca-qualification-20260803/` 已完成 16/16 个
+CABS 任务，包括 8 个 `3Q9X_A`–Pc 控制和 8 个 `3Q04_A`–P15 技术先导。控制完整轨迹
+共有 80,000 帧，其中 53,314 帧满足 10 Å 粗粒化拓扑候选包络，39,547 帧同时接触
+受体。完整有效池中有 9 个模型同时达到 L-RMSD ≤5.5 Å 与原生 Cα 接触恢复 ≥0.20，
+分布在 seed `120655` 和 `120657`，因此精确姿态采样达到预声明的 2-seed 门槛。
+
+固定预算从控制任务保留 2,748 个候选。它没有保留上述 9 个精确姿态，但在
+“配体质心距实验位置 ≤4.0 Å 且接触恢复 ≥0.20”的位点判据下保留了 16 个候选，仍由
+`120655` 和 `120657` 两个 seed 支持，且两组 site 证据满足冻结的两两相容规则。逐帧
+审计表明，精确姿态所在 site 的人口排名为 2、26 和 47，均未被 64-site 上限删除；
+丢失发生在 site 内的低频 pose 簇，其人口排名最低达到 146，部分簇只有 1–7 帧。
+把每个 site 的 pose 上限抬到足以保留这些离群簇，会接近重新保留全部姿态，既破坏
+固定预算，也是在已查看控制上过拟合。
+
+因此阶段二资格边界改为：完整 TRAF 仍用 5.5 Å L-RMSD 检验全局采样器能否进入局部
+精修吸引域；有限候选集只检验实验结合位点是否被保留；候选中的精确 pose 召回作为
+描述性诊断，不作为位点发现门槛。阶段三再用独立的 4IB5/Pc 局部恢复控制验证
+FlexPepDock 能否从该位点内的粗粒化起点恢复精确姿态。`120655..120662` 已用于这项
+边界开发，不能宣布为正式留出资格；正式资格必须使用未查看的 `120663..120670`。
+
+### 旧 SG 约束协议的全原子拓扑校准结果
 
 32 个 native-free 分层样本使用对齐的实验 receptor-only、cg2all 重建肽链、
 `ForceDisulfides`、prepack 和单次局部 refine。每层要求至少 6/8 模型且覆盖至少 6 个
-独立开发 seed 通过全部几何、位点保持和归一化 Rosetta 应变判据。
+独立开发 seed 通过当时冻结的几何、位点保持和归一化 Rosetta 应变判据。
 
 | Cys Cα 距离层 | 通过模型 | 通过 seed | 判定 |
 |---|---:|---:|---|
@@ -123,8 +147,40 @@ qualification evaluator 读取，候选收集接口本身没有 native 输入。
 | `7–8 Å` | 5/8 | 5/8 | 未通过 |
 | `8–10 Å` 对照 | 5/8 | 5/8 | 描述性，不参与阈值选择 |
 
-因此，最大连续通过阈值为 **7 Å**。该结果只校准标准氨基酸二硫环的粗粒化候选筛选，
-不验证端基化学、亲和力排序或非二硫宏环的可迁移性。
+该协议的最大连续通过阈值曾为 **7 Å**。但后续审计发现项目依赖一个非必要的
+`--disulfide-bonds` 外部源码补丁，并以 SG 伪中心 2 Å 零宽约束代表二硫环；当前实现
+已改用官方 `--ca-rest-add`，并用 apo `3Q04_A` 而非结合态 `4IB5` 作为全局回对接受体。
+因此以下报告只保留为旧协议历史证据，不再是当前方法的授权报告：
+`outputs/discovery/topology_calibrations/4ib5-pc-topology-calibration-full-traf-20260803/topology_calibration_report.json`，
+SHA-256 为 `c068c1fb9947d41e0416393c8b32df156594b9ad32973733cc39d314727db1a8`。
+
+### 当前 CA 约束协议的全原子拓扑校准结果
+
+当前新协议使用 5.5 Å、权重 1.0 的 Cys C-alpha 采样约束，`120655..120662` 的完整
+TRAF 是 6/7/8/10 Å 分层开发来源。第一次全原子运行揭示了两个实现混杂：Rosetta
+scorefile 中未定义的可选界面指标会输出 `NaN`，但旧解析器把整条结构误判失败；无约束
+FlexPepDock 虽能闭合二硫键，却会让部分肽整体离开原 site，导致 `≤6 Å` 仅 3/8 通过，
+而 `7–8 Å` 反常地达到 6/8。该结果说明校准协议职责错误，不能用于选择 C-alpha 阈值。
+
+修正后，解析器只忽略未定义的可选列；任何实际读取的 score 仍必须存在且有限。拓扑
+精修对所有肽 C-alpha 使用 `FLAT_HARMONIC` 坐标约束，平底宽度 2 Å、标准差 1 Å、
+score 权重 1，并继续用独立的 4 Å 质心、50% 接触保持、1.8–2.3 Å S–S、受体/肽
+构象保持和重原子穿插判据事后验收。该约束只隔离闭环恢复，不把 native 位置输入流程。
+
+正式 `/5` 校准结果如下：
+
+| Cys Cα 距离层 | 通过模型 | 通过 seed | 判定 |
+|---|---:|---:|---|
+| `≤6 Å` | 8/8 | 8/8 | 通过 |
+| `6–7 Å` | 8/8 | 8/8 | 通过 |
+| `7–8 Å` | 8/8 | 8/8 | 通过 |
+| `8–10 Å` | 8/8 | 8/8 | 通过 |
+| `10–12 Å` 外部对照 | 7/8 | 7/8 | 描述性，不提升阈值 |
+
+最大连续合格包络冻结为 **10 Å**。授权报告为
+`outputs/discovery/topology_calibrations/ck2-alpha-ca-constrained-topology-20260804/topology_calibration_report.json`，
+SHA-256 为 `b3a24d6ea8531246b523d33b9e8c2998f01d4f899b3cf11faf2c74151fd25659`。
+后续使用未查看的 `120663..120670` 做正式全局方法资格。
 
 ### 阶段二参数依据审计
 
@@ -136,12 +192,14 @@ qualification evaluator 读取，候选收集接口本身没有 native 输入。
 | `filtering_count=1000`、`filtering_mode=each` | 保留 | 每条 replica 按结合能保留 100 帧，10 条轨迹合计 1,000 帧 |
 | `clustering_medoids=10`、`clustering_iterations=100` | 保留为基线 | Top-10 与论文评估集一致，但 2025 研究和本项目校准均显示完整 ensemble 可能含有未被 Top-10 保留的正确模型 |
 | `trajectory_contact_ca_threshold_A=10.0` | 冻结完整轨迹接触表示 | TRAF 只含 Cα；项目对 native 和 sampled pose 使用同一 10 Å Cα 接触定义，不与上游 SC 伪中心或全原子重原子接触混用 |
-| `max_disulfide_ca_distance_A` | 由独立分层校准冻结 | 6/7/8 Å 是预注册候选，10 Å 只作阈值外对照；cg2all 重建肽链后 graft 对齐的实验 receptor-only，避免整体重建受体产生异常主链能；每层再经 `ForceDisulfides`、prepack 和单结构局部 refine，以 S–S、碰撞、形变、site、接触保持及按残基归一化的 `fa_rep`/主链应变组合判定 |
+| `disulfide_ca_restraint_distance_A=5.5`、`weight=1.0` | 当前 CABS 环拓扑表达 | 使用官方 C-alpha 距离约束，不修改第三方源码；该约束是采样先验，不是共价键声明 |
+| `max_reconstructable_disulfide_ca_distance_A=10.0` | 已由 `/5` 全原子校准冻结 | 6/7/8/10 Å 四层均为 8/8 模型与 8/8 seed 通过；10–12 Å 外部对照不参与阈值提升；cg2all、`ForceDisulfides`、prepack、受约束局部 refine 和组合几何判据共同定义可恢复性 |
 | `min_models_for_selection=10` | 纯技术聚类下限 | 只决定模型少于 10 个时跳过选择；不会使 topology 科学资格通过，也不会进入整个方法的 `qualified` 判定 |
 | `selection_contact_jaccard_distance=0.8`、`selection_position_distance_A=12.0` | 已在新验证 seed 前冻结 | 宽松 site 预分组用于避免过早丢弃表面区域；新资格 seed 只验证该固定合同，不再从网格选值 |
-| `pose_clustering_rmsd_A=4.0`、完整 pose 簇覆盖 | 冻结位点内去重 | 不按密度或能量截断低频 basin；每簇保存几何 medoid 与 energy-best，随后才按跨 seed site 支持收敛 |
+| `max_native_site_centroid_distance_A=4.0`、接触恢复 `≥0.20` | 已在正式留出 seed 前冻结 | 有限候选只承担位点保留；4 Å 与拓扑校准的 pose 位置保持尺度一致，接触项避免仅靠质心接近误判；精确 5.5 Å pose 召回另作描述性指标 |
+| `pose_clustering_rmsd_A=4.0`、`max_sites_per_task=64`、`max_pose_clusters_per_site=4` | 冻结的有限预算位点内去重 | site 与 pose 簇按人口、最低相互作用能和稳定身份排序；每簇保存几何 medoid 与 energy-best，单任务最多 512 个候选，必须用新 seed 验证召回 |
 | `protein_restraints=rigid,5,5.0,15.0` | 保留 | CABSdock 的实验受体默认刚性约束定义；受体构象变化由多个实验结构表达 |
-| `contact_jaccard_distance=0.8`、`position_distance_A=12.0` | 已冻结跨 seed/构象 site 合并 | 支持度以独立 seed 数优先，模型数只表示簇密度；CK2α 与 CK2α′分别分析，不混合支持度 |
+| `contact_jaccard_distance=0.8`、`position_distance_A=12.0` | 已冻结跨 seed/构象 site 合并 | 资格使用 recovered pose 的最大两两相容跨 seed 集合，避免星形邻域虚增支持度；production 仍 native-free 聚类；CK2α 与 CK2α′分别分析 |
 
 ## 野生型 apo / apo-like 受体
 
@@ -155,6 +213,15 @@ qualification evaluator 读取，候选收集接口本身没有 native 输入。
 | **5YF9** | 人 CK2α′ | 野生型 apo-like，form-2 | 1.89 Å | 无目标蛋白突变；含 N 端表达标签、烟酸和硫酸根 | CK2α′ 无界面配体状态的高分辨率实验构象 |
 | **5Y9M** | 人 CK2α′ | 野生型 apo-like，form-3 | 2.01 Å | 无目标蛋白突变；含 N 端表达标签、烟酸和硫酸根 | 不同晶型下的 CK2α′ apo-like 构象 |
 
+### 阶段二资格控制受体
+
+`3Q9X` 是人 CK2α–emodin 结构，不是化学意义上的 apo。它之所以进入项目，是因为
+公开环肽对接 benchmark 将其作为 4IB5/Pc 的 **unbound receptor**：这里的 unbound
+只表示没有 Pc，而不是没有任何小分子。项目从作者链 A 派生 receptor-only 资格输入，
+移除 `EMO`、`EDO`、`7PE`、`SO4` 和水；它不加入 P15 的生产 apo ensemble，`3Q04` 与
+`3QA0` 的生产角色不变。依据：[RCSB 3Q9X](https://www.rcsb.org/structure/3Q9X)、
+[环肽 CABS-dock 研究](https://doi.org/10.1021/acs.jctc.5c00995)。
+
 ### 本项目的链选择与基础制备审计
 
 下表来自本项目对原始 mmCIF 的可复现审计，不用页面显示的链字母代替 author/label
@@ -165,6 +232,7 @@ qualification evaluator 读取，候选收集接口本身没有 native 输入。
 |---|---|---|---:|---:|---|
 | `3Q04_A` | A / A | 唯一 P68400 蛋白链 | 328 | 0 | 派生物移除水、EDO、SO4；3 个替代构象残基按最高平均占有率选择 |
 | `3QA0_A` | A / A | A、B 有坐标残基数相同，A 平均 B-factor 较低 | 330 | 6 | 派生物移除水、EDO、SO4；2 个替代构象残基按最高平均占有率选择 |
+| `3Q9X_A` | A / A | 公开 4IB5/Pc unbound benchmark 指定结构；A、B 均为 P68400 | 330 | 6 | 仅作资格控制；派生物移除水、EMO、EDO、7PE、SO4；3 个替代构象残基按最高平均占有率选择 |
 | `5YF9_X` | X / A | X、B 有坐标残基数相同，X 平均 B-factor 较低 | 319 | 20 | 派生物移除水、NIO、SO4；3 个替代构象残基按最高平均占有率选择 |
 | `5Y9M_A` | A / B | A 比 X 多 1 个有坐标残基 | 320 | 19 | 派生物移除水、NIO、SO4；原结构无替代位置原子记录 |
 

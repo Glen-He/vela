@@ -261,6 +261,20 @@ def test_score_row_rejects_missing_configured_column(tmp_path: Path) -> None:
         rows[0].score(_local_control().ranking_score)
 
 
+def test_scorefile_keeps_decoy_with_undefined_optional_metric(tmp_path: Path) -> None:
+    scorefile = tmp_path / "refine.sc"
+    scorefile.write_text(
+        "SCORE: total_score custom_rank optional_metric description\n"
+        "SCORE: -10.0 -3.0 -nan decoy_1\n",
+        encoding="utf-8",
+    )
+
+    row = read_rosetta_scorefile(scorefile)[0]
+    assert row.score("custom_rank") == -3.0
+    with pytest.raises(ValidationError, match="lacks required column"):
+        row.score("optional_metric")
+
+
 def _coarse_chain(
     *, chain_id: str, residue_names: tuple[str, ...], y_offset: float
 ) -> gemmi.Chain:
@@ -331,6 +345,7 @@ def test_topology_reconstruction_requires_composite_all_atom_geometry(
         min_disulfide_sg_A=1.8,
         max_disulfide_sg_A=2.3,
         min_interchain_heavy_atom_distance_A=1.2,
+        min_nonlocal_peptide_heavy_atom_distance_A=1.2,
         contact_ca_threshold_A=10.0,
         max_peptide_internal_ca_rmsd_A=4.0,
         max_ligand_centroid_displacement_A=4.0,
@@ -352,6 +367,7 @@ def test_topology_reconstruction_requires_composite_all_atom_geometry(
         min_disulfide_sg_A=1.8,
         max_disulfide_sg_A=2.3,
         min_interchain_heavy_atom_distance_A=1.2,
+        min_nonlocal_peptide_heavy_atom_distance_A=1.2,
         contact_ca_threshold_A=10.0,
         max_peptide_internal_ca_rmsd_A=4.0,
         max_ligand_centroid_displacement_A=4.0,
@@ -374,6 +390,7 @@ def test_topology_reconstruction_requires_composite_all_atom_geometry(
         min_disulfide_sg_A=1.8,
         max_disulfide_sg_A=2.3,
         min_interchain_heavy_atom_distance_A=1.2,
+        min_nonlocal_peptide_heavy_atom_distance_A=1.2,
         contact_ca_threshold_A=10.0,
         max_peptide_internal_ca_rmsd_A=4.0,
         max_ligand_centroid_displacement_A=4.0,
@@ -516,7 +533,7 @@ def _all_atom_chain(
             atom = gemmi.Atom()
             atom.name = "SG"
             atom.element = gemmi.Element("S")
-            atom.pos = gemmi.Position(0.0 if index == 1 else 2.05, y_offset, 1.0)
+            atom.pos = gemmi.Position(0.0 if index == 1 else 2.05, y_offset, 2.0)
             residue.add_atom(atom)
         chain.add_residue(residue)
     return chain
@@ -692,7 +709,7 @@ def test_refinement_tasks_are_derived_from_handoff_and_configured_seeds(
     atomic_write_json(
         run_dir / "handoff_manifest.json",
         {
-            "schema": "vela.validation-handoff-manifest/2",
+            "schema": "vela.validation-handoff-manifest/3",
             "status": "completed",
             "chemistry_id": config.chemistry.chemistry_id,
             "evidence_category": "main_discovery_handoff",

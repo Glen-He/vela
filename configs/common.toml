@@ -58,6 +58,21 @@ retain_components = []
 selection_reason = "Chain A and B have equal modeled residue counts; A has the lower mean B-factor and avoids treating crystal copies as independent conformers."
 
 [[receptors]]
+# 4IB5/Pc 环肽基准公开使用的 unbound CK2α 对照；仅服务方法资格，不进入生产 ensemble。
+receptor_id = "3Q9X_A"
+pdb_id = "3Q9X"
+target = "ck2_alpha"
+uniprot_accession = "P68400"
+author_chain_id = "A"
+structure_state = "inhibitor_bound_unbound_benchmark"
+roles = ["qualification_control"]
+prepare = true
+water_policy = "remove_all"
+remove_components = ["7PE", "EDO", "EMO", "SO4"]
+retain_components = []
+selection_reason = "Published unbound receptor paired with 4IB5 in cyclic-peptide docking benchmarks; chain A is stripped of the deposited emodin identifiers, ethylene glycol, sulfate, and water only for method qualification."
+
+[[receptors]]
 # CK2α′ apo-like 主发现受体。
 receptor_id = "5YF9_X"
 pdb_id = "5YF9"

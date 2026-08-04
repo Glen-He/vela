@@ -67,15 +67,14 @@ def _selected_candidates(
     )
     if len(requested_ids) != len(set(requested_ids)):
         raise ValidationError("requested candidate IDs must be unique")
-    if requested_ids:
-        unknown = sorted(set(requested_ids) - set(candidates))
-        if unknown:
-            raise ValidationError("unknown candidate IDs: " + ", ".join(unknown))
-        selected = tuple(candidates[candidate_id] for candidate_id in requested_ids)
-    else:
-        selected = tuple(
-            candidate for candidate in candidates.values() if candidate.supported
+    if not requested_ids:
+        raise ValidationError(
+            "at least one explicit candidate ID is required for all-atom handoff"
         )
+    unknown = sorted(set(requested_ids) - set(candidates))
+    if unknown:
+        raise ValidationError("unknown candidate IDs: " + ", ".join(unknown))
+    selected = tuple(candidates[candidate_id] for candidate_id in requested_ids)
     if not selected:
         raise ValidationError("no supported candidate sites are available for handoff")
     unsupported = [item.candidate_id for item in selected if not item.supported]
@@ -126,7 +125,7 @@ def build_handoff_tasks(
     *,
     config: AppConfig,
     discovery_run_dir: Path,
-    candidate_ids: tuple[str, ...] = (),
+    candidate_ids: tuple[str, ...],
 ) -> tuple[CandidateHandoffTask, ...]:
     """只从受支持 blind site 选择跨 seed 的非冗余起点。"""
     try:
@@ -240,7 +239,7 @@ def write_handoff_plan(
     config: AppConfig,
     discovery_run_dir: Path,
     run_id: str,
-    candidate_ids: tuple[str, ...] = (),
+    candidate_ids: tuple[str, ...],
 ) -> CandidateHandoffPlan:
     """冻结阶段二来源、候选选择、输入哈希和重建工具身份。"""
     try:
@@ -271,7 +270,7 @@ def write_handoff_plan(
     atomic_write_json(
         run_dir / HANDOFF_PLAN_NAME,
         {
-            "schema": "vela.validation-handoff-plan/2",
+            "schema": "vela.validation-handoff-plan/3",
             "stage": "validation_candidate_handoff",
             "status": "planned",
             "run_id": run_id,

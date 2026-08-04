@@ -24,7 +24,7 @@ def test_project_config_resolves_paths_relative_to_config() -> None:
     config = load_config(PROJECT_CONFIG_DIR)
     assert config.paths.data_dir == PROJECT_ROOT / "data"
     assert config.paths.outputs_dir == PROJECT_ROOT / "outputs"
-    assert len(config.receptors) == 9
+    assert len(config.receptors) == 10
     assert config.chemistry.ligand_id == "p15"
     assert config.chemistry.chemistry_id == "p15-free-n-amide-hie-ph7p4"
     assert config.chemistry.n_terminus == "NH3+"
@@ -35,6 +35,7 @@ def test_project_config_resolves_paths_relative_to_config() -> None:
     assert [item.receptor_id for item in config.receptors if item.prepare] == [
         "3Q04_A",
         "3QA0_A",
+        "3Q9X_A",
         "5YF9_X",
         "5Y9M_A",
     ]
@@ -48,10 +49,13 @@ def test_project_config_resolves_paths_relative_to_config() -> None:
         for item in config.receptors
         if "full_enzyme_environment" in item.roles
     ] == ["4MD7_E", "1JWH_A"]
-    assert config.discovery.method_id == "cabsdock-global-disulfide-site-first-cg"
-    assert config.discovery.adapter_id == "vela-cabsdock-site-first-cg"
+    assert (
+        config.discovery.method_id
+        == "cabsdock-global-cyclic-ca-restraint-site-first-cg"
+    )
+    assert config.discovery.adapter_id == "vela-cabsdock-cyclic-site-first-cg"
     assert config.discovery.seeds == tuple(range(120623, 120631))
-    assert config.discovery.qualification.seeds == tuple(range(120647, 120655))
+    assert config.discovery.qualification.seeds == tuple(range(120663, 120671))
     assert not config.discovery.config_complete
     assert config.download.chunk_size_bytes == 1_048_576
     assert config.download.backoff_multiplier == 2.0
@@ -73,16 +77,13 @@ def test_project_config_resolves_paths_relative_to_config() -> None:
         config.discovery.cabsdock.source_revision
         == "36ec10e681d0b6c5c991101bc0bdfc6e224c5e0b"
     )
-    assert config.discovery.cabsdock.patch_file == (
-        PROJECT_ROOT / "patches" / "cabsdock-3.0.12-disulfide-cli.patch"
-    )
     assert config.discovery.cabsdock.mc_annealing == 20
     assert config.discovery.cabsdock.seed_workers == 8
     assert config.discovery.cabsdock.replicas_dtemp == 0.5
     assert config.discovery.cabsdock.temperature_initial == 2.0
     assert config.discovery.cabsdock.temperature_final == 1.0
     assert config.discovery.target("ck2_alpha").analysis.min_seed_support == 2
-    assert config.discovery.target("ck2_alpha").analysis.min_receptor_support == 1
+    assert config.discovery.target("ck2_alpha").analysis.min_receptor_support == 2
     assert config.validation.rosetta.parallel_tasks == 8
     assert config.validation.rosetta.decoys_per_seed == 128
     assert config.validation.seeds == (120623, 120624, 120625, 120626)
@@ -90,11 +91,18 @@ def test_project_config_resolves_paths_relative_to_config() -> None:
     assert config.design.screen.parallel_tasks == 8
     assert config.design.finalists.parallel_tasks == 8
     assert config.discovery.cabsdock.filtering_count == 1000
-    assert config.discovery.cabsdock.max_disulfide_ca_distance_A == 7.0
+    assert config.discovery.cabsdock.disulfide_ca_restraint_distance_A == 5.5
+    assert config.discovery.cabsdock.disulfide_ca_restraint_weight == 1.0
+    assert config.discovery.cabsdock.max_reconstructable_disulfide_ca_distance_A == 10.0
     assert config.discovery.cabsdock.min_models_for_selection == 10
     assert config.discovery.qualification.control_target_id == "ck2_alpha"
+    assert config.discovery.qualification.control_receptor_id == "3Q9X_A"
     assert config.discovery.qualification.topology_calibration_status == "qualified"
-    assert config.discovery.qualification.topology_calibration_report is not None
+    assert config.discovery.qualification.topology_calibration_report == (
+        PROJECT_ROOT / "outputs/discovery/topology_calibrations/"
+        "ck2-alpha-ca-constrained-topology-20260804/"
+        "topology_calibration_report.json"
+    )
     assert config.validation.cg2all.expected_version == "1.2.0"
     assert config.validation.cg2all.representation == "CalphaSCModel"
     assert config.validation.cg2all.receptor_histidine_state == "HIE"

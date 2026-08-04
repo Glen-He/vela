@@ -21,6 +21,10 @@ from vela.core.run_identity import validate_run_id
 from vela.core.typed_data import object_mapping
 from vela.discovery.models import DiscoveryError, DiscoveryTask
 from vela.discovery.qualification.control import control_bound_state, control_chemistry
+from vela.discovery.qualification.schemas import (
+    PLAN_SCHEMA,
+    REPORT_SCHEMA,
+)
 from vela.discovery.sampling.evidence import candidate_selection_contract
 from vela.discovery.sampling.planning import cabsdock_parameters
 from vela.preparation.chemistry import ChemistryDefinition
@@ -88,7 +92,24 @@ def build_qualification_cases(
     control_root = (
         config.paths.data_dir / "validation" / "bound_states" / state.state_id
     )
-    control_receptor = control_root / "receptor_only.cif"
+    control_receptor_definition = receptor_by_id.get(
+        config.discovery.qualification.control_receptor_id
+    )
+    if (
+        control_receptor_definition is None
+        or control_receptor_definition.target
+        != config.discovery.qualification.control_target_id
+        or "qualification_control" not in control_receptor_definition.roles
+    ):
+        raise DiscoveryError(
+            "qualification control receptor lacks its qualification_control role"
+        )
+    control_receptor = (
+        config.paths.data_dir
+        / "receptors"
+        / "prepared"
+        / f"{control_receptor_definition.receptor_id}.cif"
+    )
     native_pair = control_root / "pair_reference.cif"
     required = (pilot_path, reference_path, control_receptor, native_pair)
     missing = [path for path in required if not path.is_file()]
@@ -108,8 +129,11 @@ def build_qualification_cases(
             cases.append(
                 QualificationCase(
                     task=DiscoveryTask(
-                        task_id=f"control_{state.state_id}__seed_{seed}",
-                        receptor_id=state.state_id,
+                        task_id=(
+                            f"control_{state.state_id}_on_"
+                            f"{control_receptor_definition.receptor_id}__seed_{seed}"
+                        ),
+                        receptor_id=control_receptor_definition.receptor_id,
                         target=config.discovery.qualification.control_target_id,
                         receptor_path=control_receptor,
                         receptor_sha256=sha256_file(control_receptor),
@@ -121,7 +145,7 @@ def build_qualification_cases(
                     ),
                     chemistry=control_definition,
                     secondary_structure=control_secondary,
-                    reference_receptor_id=state.state_id,
+                    reference_receptor_id=control_receptor_definition.receptor_id,
                     reference_path=control_receptor,
                     native_pair_path=native_pair,
                 )
@@ -193,7 +217,7 @@ def _shared_control_record(
         control.get("candidate_selection"), name="shared candidate selection"
     )
     if (
-        report.get("schema") != "vela.discovery-qualification-report/4"
+        report.get("schema") != REPORT_SCHEMA
         or report.get("status") != "qualified"
         or selection.get("passed") is not True
         or not is_current_vela_software(plan.get("software"))
@@ -276,11 +300,13 @@ def topology_calibration_record(config: AppConfig) -> dict[str, JsonValue]:
         raise DiscoveryError(
             "topology calibration report differs from the current method contract"
         )
-    calibrated_threshold = report_record.get("calibrated_max_disulfide_ca_distance_A")
+    calibrated_threshold = report_record.get(
+        "calibrated_max_reconstructable_disulfide_ca_distance_A"
+    )
     if (
         qualification.topology_calibration_status == "qualified"
         and calibrated_threshold
-        != config.discovery.cabsdock.max_disulfide_ca_distance_A
+        != config.discovery.cabsdock.max_reconstructable_disulfide_ca_distance_A
     ):
         raise DiscoveryError(
             "configured CABS topology threshold differs from the calibrated threshold"
@@ -351,8 +377,8 @@ def qualification_decision_rules(
     return {
         "candidate_selection": candidate_selection_contract(config.discovery.cabsdock),
         "topology_feasibility": {
-            "max_disulfide_ca_distance_A": (
-                config.discovery.cabsdock.max_disulfide_ca_distance_A
+            "max_reconstructable_disulfide_ca_distance_A": (
+                config.discovery.cabsdock.max_reconstructable_disulfide_ca_distance_A
             ),
             "qualification_gate": False,
             "min_models_for_selection": (
@@ -360,10 +386,17 @@ def qualification_decision_rules(
             ),
         },
         "max_native_ligand_rmsd_A": rules.max_native_ligand_rmsd_A,
+        "max_native_site_centroid_distance_A": (
+            rules.max_native_site_centroid_distance_A
+        ),
         "min_native_receptor_contact_fraction": (
             rules.min_native_receptor_contact_fraction
         ),
-        "min_successful_control_seeds": rules.min_successful_control_seeds,
+        "min_native_sampling_seed_support": rules.min_native_sampling_seed_support,
+        "min_native_site_seed_support": rules.min_native_site_seed_support,
+        "min_selection_native_seed_recall_fraction": (
+            rules.min_selection_native_seed_recall_fraction
+        ),
         "site_analysis": {
             "parameter_selection": "frozen_before_validation_seeds",
             "contact_jaccard_distance": target_analysis.contact_jaccard_distance,
@@ -454,7 +487,7 @@ def write_qualification_plan(
     atomic_write_json(
         run_dir / "qualification_plan.json",
         {
-            "schema": "vela.discovery-qualification-plan/4",
+            "schema": PLAN_SCHEMA,
             "stage": "discovery_qualification",
             "status": "planned",
             "run_id": run_id,
@@ -468,6 +501,8 @@ def write_qualification_plan(
             "shared_control": shared_control,
             "control_scope": {
                 "control_target_id": rules.control_target_id,
+                "control_receptor_id": rules.control_receptor_id,
+                "native_bound_state_id": rules.control_bound_state_id,
                 "requested_target_id": target_id,
                 "target_matched": target_id == rules.control_target_id,
             },

@@ -99,7 +99,6 @@ def _settings() -> CabsDockSettings:
         executable=Path("/test/CABSdock"),
         source_dir=Path("/test/cabs-source"),
         source_revision="1" * 40,
-        patch_file=Path("/test/cabs.patch"),
         seed_workers=1,
         peptide_secondary_structure="CCCCCCCCCCC",
         mc_annealing=1,
@@ -117,11 +116,15 @@ def _settings() -> CabsDockSettings:
         clustering_medoids=2,
         clustering_iterations=1,
         trajectory_contact_ca_threshold_A=10.0,
-        max_disulfide_ca_distance_A=8.0,
+        disulfide_ca_restraint_distance_A=5.5,
+        disulfide_ca_restraint_weight=1.0,
+        max_reconstructable_disulfide_ca_distance_A=10.0,
         min_models_for_selection=2,
         selection_contact_jaccard_distance=0.8,
         selection_position_distance_A=12.0,
         pose_clustering_rmsd_A=4.0,
+        max_sites_per_task=64,
+        max_pose_clusters_per_site=4,
     )
 
 
@@ -144,7 +147,7 @@ def _chemistry() -> ChemistryDefinition:
 
 
 def _selection() -> CandidateSelectionSettings:
-    return CandidateSelectionSettings(0.8, 12.0, 4.0)
+    return CandidateSelectionSettings(0.8, 12.0, 4.0, 64, 4)
 
 
 def _fake_materializer(monkeypatch: pytest.MonkeyPatch) -> None:

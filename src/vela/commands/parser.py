@@ -288,8 +288,8 @@ def build_parser() -> argparse.ArgumentParser:
     validation_handoff_plan.add_argument(
         "--candidate-id",
         action="append",
-        default=[],
-        help="Supported candidate ID to include; repeat or omit for all supported sites.",
+        required=True,
+        help="Supported candidate ID to include; repeat for an explicit reviewed set.",
     )
     validation_handoff_run = validation_commands.add_parser(
         "handoff-run", help="Execute or resume a frozen all-atom handoff."

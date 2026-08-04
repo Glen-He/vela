@@ -5,6 +5,7 @@ import pytest
 from vela.discovery.analysis.clustering import analyze_sites
 from vela.discovery.analysis.evidence import PoseEvidence
 from vela.discovery.models import DiscoveryError, SiteAnalysisSettings
+from vela.discovery.qualification.analysis import best_native_coherent_site_evidence
 
 SETTINGS = SiteAnalysisSettings(
     contact_jaccard_distance=0.5,
@@ -170,3 +171,49 @@ def test_analysis_rejects_inconsistent_coordinate_frames_within_target() -> None
 
     with pytest.raises(DiscoveryError, match="one aligned coordinate frame"):
         analyze_sites(poses=poses, settings=SETTINGS)
+
+
+def test_native_site_support_requires_pairwise_compatible_poses() -> None:
+    contacts = frozenset({"A:10", "A:11"})
+    poses = {
+        pose.pose_id: pose
+        for pose in (
+            _pose(
+                "a_anchor",
+                receptor="3Q04_A",
+                target="ck2_alpha",
+                seed=1,
+                contacts=contacts,
+                x=0.0,
+                frame="3Q04_A",
+            ),
+            _pose(
+                "b_left",
+                receptor="3Q04_A",
+                target="ck2_alpha",
+                seed=2,
+                contacts=contacts,
+                x=-1.8,
+                frame="3Q04_A",
+            ),
+            _pose(
+                "c_right",
+                receptor="3Q04_A",
+                target="ck2_alpha",
+                seed=3,
+                contacts=contacts,
+                x=1.8,
+                frame="3Q04_A",
+            ),
+        )
+    }
+
+    seed_support, precision = best_native_coherent_site_evidence(
+        recovered=set(poses),
+        poses=poses,
+        contact_limit=0.5,
+        position_limit=2.0,
+    )
+
+    assert seed_support == 2
+    assert precision == 1.0

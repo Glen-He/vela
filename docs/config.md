@@ -62,41 +62,53 @@ Vela 只有两个参数来源，职责不能混用：
 
 当前已经选择 CABS-dock 作为阶段二候选方法，真实采样参数均已进入上述配置层，代码中
 不再散落 Monte Carlo、replica、过滤或聚类数值。正式主发现固定 8 个 seed：
-`120623..120630`；`120631..120638` 用于开发，`120639..120646` 已用于旧合同验证和
-根因诊断，当前 `120647..120654` 专用于完整 TRAF 合同的资格任务。一次 run 只选一个
+`120623..120630`；`120631..120654` 已用于旧 SG 约束协议的开发、验证和根因诊断；
+`120655..120662` 已用于新 CA 约束协议的位点/姿态边界开发，并作为拓扑校准来源；
+正式留出资格固定使用未查看的 `120663..120670`。一次 run 只选一个
 target；当前每个 target 有 2 个受体构象，因此展开为 16 个 CABS
 任务。`seed_workers=8` 表示最多 8 个 worker 并发领取 seed，每个 worker 内按配置顺序串行
 执行该 target 的 2 个受体构象；它不是 CABS-dock 单任务的内部并行数。
 `discovery.targets.<target-id>` 分别保存坐标参考、技术先导受体、资格报告及哈希和
 site 分析规则，不能用一个 target 的先导替另一个 target 放行。首轮采用
-`min_seed_support=2`、`min_receptor_support=1` 保留重复出现或构象特异的候选，但在
-P15 技术先导和 4IB5/Pc 留出验证完成前仍不能创建 production 运行。
+`min_seed_support=2`、`min_receptor_support=2` 要求候选同时获得跨 seed 和跨 apo
+受体构象支持；构象特异 site 仍会写入报告，但不会自动进入阶段三。P15 技术先导和
+4IB5/Pc 留出验证完成前仍不能创建 production 运行。
 
-`discovery.qualification` 使用独立 seed `120647..120654`，并登记 4IB5/Pc 阳性控制、
-实验回收硬门槛、全原子拓扑校准和已经冻结的 site 距离。首个资格运行包含 8 个控制
+`discovery.qualification` 当前使用正式留出 seed `120663..120670`，并登记公开 unbound
+基准 `3Q9X_A` 控制受体、4IB5/Pc native 参考、实验回收门槛、全原子拓扑校准和已经冻结的
+site 距离。首个开发运行包含 8 个控制
 任务和 8 个 apo 先导任务；新验证 seed 只验证固定参数，不再用于选择参数。
 实验控制分别报告 topology-feasible 且接触受体的 eligible sampling pool、项目侧
 site-first 候选和上游 Top-10
-基线。资格门槛要求至少 4 个独立 seed 的 site-first 候选中出现配体 CA L-RMSD ≤5.5 Å
-且原生受体接触恢复比例 ≥0.20 的 pose；eligible pool 只判断采样能力，Top-10 只作
-非门控基线。
+基线。采样门槛要求至少 2 个独立 seed 在完整池中出现配体 CA L-RMSD ≤5.5 Å 且
+原生受体接触恢复比例 ≥0.20 的 pose；有限候选的职责是保留结合位点，因此要求候选
+质心距实验配体质心 ≤4.0 Å、接触恢复比例 ≥0.20，并召回全部采样成功 seed；native
+位点还必须获得至少 2 个 seed 的两两相容支持。候选中精确 5.5 Å pose 的数量继续作为
+描述性指标报告，但不再充当阶段二位点发现门槛。三项门槛分别检验采样、有限预算位点
+召回和位点重复性，不再复用一个 4/8 投票门槛。Top-10 只作非门控基线。
 该控制验证位点级全局召回，不是亲和力验证。
 
-`discovery.qualification.topology_calibration` 把开发 seed 的 Top-1000 按 Cys 端点
-Cα 距离分层，按 seed、site、CABS 相互作用能和 SC 伪中心距离覆盖抽样。候选阈值为
-6/7/8 Å，10 Å 层只作外部对照。每个样本先由 cg2all 重建肽链，再把实验
+`discovery.qualification.topology_calibration` 把开发 seed 的完整 TRAF 候选按 Cys 端点
+Cα 距离分层，按 seed、site、CABS 相互作用能和 Cα 距离分位覆盖抽样；选中后才调用
+CABS 自身运行时物化 CA/SC 帧，SC 距离只作描述性特征。候选包络为
+6/7/8/10 Å，12 Å 层只作外部对照。每个样本先由 cg2all 重建肽链，再把实验
 receptor-only 结构对齐到 CABS 受体并替换神经网络重建的受体，然后经过
-RosettaScripts `ForceDisulfides`、FlexPepDock prepack 和一个无 native 的局部 refine；
-报告同时检查
-受体 CA 保真、肽内部形变、site 质心、接触保持、S–S 距离和严重界面穿插，并选择
-连续通过分层判据的最大候选阈值。最终 `fa_rep` 及 `omega + rama_prepro` 还会按复合物
-残基数归一化，拒绝虽无明显界面穿插但仍存在异常全原子排斥或主链应变的结构。
+RosettaScripts `ForceDisulfides`、FlexPepDock prepack 和一个无 native、带肽 C-alpha
+平底坐标约束的局部 refine；约束平底宽度 2 Å、标准差 1 Å、权重 1，只防止闭环优化
+变成第二次无约束位姿搜索，不替代事后的 site 与接触保持判据。
+每层仍要求至少 6/8 模型且覆盖 6 个 seed 通过，不能为保留 10 Å 包络而降低旧门槛。
+报告同时检查受体 CA 保真、肽内部形变、site 质心、接触保持、S–S 距离、严重界面
+穿插和肽内非局部重原子穿插，并选择连续通过分层判据的最大候选阈值。Rosetta
+`fa_rep`、`omega` 和 `rama_prepro` 完整记录但不门控；旧的“总复合物分数/全部残基数”
+会被 300 多个受体残基稀释，不能代表局部环肽质量。
 `min_models_for_selection=10` 只表示模型少于 10 个时
 不启动聚类，不参与 topology 科学资格判定。正式阶段二采样仍然只运行 CABS-dock；
 这里的全原子步骤只用于离线校准粗粒化筛选语义。
-2026-08-02 的正式校准结果为：`≤6 Å` 6/8、`6–7 Å` 6/8、`7–8 Å` 5/8，故项目覆盖
-将 `discovery.cabsdock.max_disulfide_ca_distance_A` 冻结为 `7.0`。10 Å 对照层不参与
-阈值选择。
+旧 SG 约束协议曾得到 `≤6 Å` 6/8、`6–7 Å` 6/8、`7–8 Å` 5/8；该结果没有迁移到
+当前 CA 约束协议。当前 `/5` 报告中 6/7/8/10 Å 四层均为 8/8 模型和 8/8 seed
+通过，10–12 Å 外部对照为 7/8；因此
+`max_reconstructable_disulfide_ca_distance_A=10.0` 与
+`topology_calibration_status=qualified` 已由独立报告冻结。
 第二个及后续 target 可以在计划时引用一个已通过的资格运行；计划会冻结并校验其
 plan、sampling、pose、原生回收表和报告哈希，仅展开新 target 的 8 个先导任务。
 
@@ -105,13 +117,19 @@ plan、sampling、pose、原生回收表和报告哈希，仅展开新 target �
 Python，但必须同步重新声明序列设计位点、guided 映射和相关科学门槛。化学记录位于
 `data/chemistry/<ligand-id>/chemistry_record.json`。
 
-`source_revision` 与 `patch_file` 是方法来源的一部分，不是可调采样参数。启动正式任务
-前会确认源码仓库处于声明的提交，并使用 `git apply --reverse --check` 验证补丁已
-应用；运行清单还会保存补丁 SHA-256。新环境的应用和验证步骤见
-[`cabsdock-patch.md`](cabsdock-patch.md)。
+`source_revision`、CABS 可执行文件 SHA-256 和影响约束、采样、TRAF 解码及过滤的关键
+源码哈希共同构成方法身份。项目不修改或补丁化外部 CABS 源码；运行前还会拒绝关键
+CABS 文件相对声明提交存在未提交改动的环境。新环境只需安装声明版本，并确认官方
+`--ca-rest-add` 接口可用。
+当前机器的 CABS 根目录是 `/home/glen/apps/cabsflex`，因此 `configs/discovery.toml` 的
+可执行文件和源码路径，以及 `pyproject.toml` 中仅供 Pyright 解析适配脚本导入的
+`scripts` execution environment，均使用该绝对路径。更换机器时必须同时改成新机器的
+真实安装位置；`typings/CABS/` 只声明适配脚本实际调用的上游接口，不包含 CABS 实现，
+也不会参与运行时导入。
 
 阶段二固定使用 CABS 粗粒化 `CA/SC` 输出，并固定传入原生
-`-F/--disulfide-bonds`、`-A N` 和无已知 site 约束的随机起点。关闭全原子重建是阶段
+`--ca-rest-add`、`-A N` 和无已知 site 约束的随机起点。当前 Cys 端点约束为
+5.5 Å、权重 1.0；这是粗粒化拓扑先验，不冒充真实 S-S 键。关闭全原子重建是阶段
 边界，不是隐藏参数：N/C 端电荷、C 端酰胺和 His7 微状态在阶段二的 CABS 表示中不会
 被逐原子区分，必须在阶段三全原子局部精修时恢复并复核。
 当前 MC、REMC、过滤和 k-medoids 数值使用 CABS-dock 3.0.12 默认协议：
@@ -119,8 +137,9 @@ Python，但必须同步重新声明序列设计位点、guided 映射和相关�
 `temperature=2.0→1.0`、每 replica 保留 100 个低能帧并生成 Top-10 medoid。Top-10
 继续保存以便和公开方法比较，但正式候选从完整 10,000 帧 TRAF 先按 Cα 二硫拓扑
 可行性和 10 Å Cα 受体接触过滤，再按宽松 site 边界分组；两层均使用清单显式冻结的
-确定性、簇直径受限 leader clustering。每个 site 内按肽 Cα RMSD 聚类，不再用任意
-数量上限截断低频 pose 簇；每簇保存 medoid 和最低 CABS 相互作用能代表，阶段三才从
+确定性、簇直径受限 leader clustering。每个任务按人口、最低相互作用能和稳定身份
+最多保留 64 个 site，每个 site 内按肽 Cα RMSD 聚类后用同一规则最多保留 4 个 pose
+簇；每簇保存 medoid 和最低 CABS 相互作用能代表，阶段三才从
 跨 seed 支持 site 中选择两个不同 seed 起点。参数来源和
 不能直接搬用的 site 阈值见 [`research.md`](research.md)。
 
@@ -156,7 +175,9 @@ CK2α 实验排布时，输出固定标记为同源布局模型，而不是 CK2�
 证据类别和输出目录始终分开。
 
 正式候选链路同样没有隐藏参数：`validation.handoff` 决定每个受体 site 选择多少个
-不同来源 seed 的 pose；`validation.refinement` 决定 prepack、局部扰动和排名 score；
+不同来源 seed 的 pose，但不决定选择哪些 site。`handoff-plan` 必须用一个或多个
+`--candidate-id` 显式提交人工审阅后的候选，空集合不会再自动展开全部 supported
+candidate；`validation.refinement` 决定 prepack、局部扰动和排名 score；
 `validation.analysis` 声明最少界面原子对/受体残基、最小重原子距离、受体 CA RMSD、
 起始接触保持、site 位移、构象簇 RMSD 及最少 refinement seed/起点支持。上述分析值
 保持 `unresolved` 时，正式精修计划会被拒绝，不能在看到候选结果后临时补阈值。

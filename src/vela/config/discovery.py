@@ -117,7 +117,6 @@ def parse_discovery(
         "executable",
         "source_dir",
         "source_revision",
-        "patch_file",
         "seed_workers",
         "peptide_secondary_structure",
         "mc_annealing",
@@ -135,11 +134,15 @@ def parse_discovery(
         "clustering_medoids",
         "clustering_iterations",
         "trajectory_contact_ca_threshold_A",
-        "max_disulfide_ca_distance_A",
+        "disulfide_ca_restraint_distance_A",
+        "disulfide_ca_restraint_weight",
+        "max_reconstructable_disulfide_ca_distance_A",
         "min_models_for_selection",
         "selection_contact_jaccard_distance",
         "selection_position_distance_A",
         "pose_clustering_rmsd_A",
+        "max_sites_per_task",
+        "max_pose_clusters_per_site",
     }
     assert_keys(
         cabsdock,
@@ -150,11 +153,15 @@ def parse_discovery(
     qualification_keys = {
         "seeds",
         "control_bound_state_id",
+        "control_receptor_id",
         "control_target_id",
         "control_secondary_structure",
         "max_native_ligand_rmsd_A",
+        "max_native_site_centroid_distance_A",
         "min_native_receptor_contact_fraction",
-        "min_successful_control_seeds",
+        "min_native_sampling_seed_support",
+        "min_native_site_seed_support",
+        "min_selection_native_seed_recall_fraction",
         "topology_calibration_status",
         "topology_calibration_report",
         "topology_calibration_report_sha256",
@@ -173,12 +180,14 @@ def parse_discovery(
         "min_success_fraction_per_stratum",
         "min_successful_seeds_per_stratum",
         "min_interchain_heavy_atom_distance_A",
+        "min_nonlocal_peptide_heavy_atom_distance_A",
         "max_peptide_internal_ca_rmsd_A",
         "max_ligand_centroid_displacement_A",
         "contact_ca_threshold_A",
         "min_receptor_contact_retention_fraction",
-        "max_refine_fa_rep_per_residue",
-        "max_refine_backbone_strain_per_residue",
+        "site_coordinate_constraint_flat_width_A",
+        "site_coordinate_constraint_sd_A",
+        "site_coordinate_constraint_weight",
     }
     assert_keys(
         topology_calibration,
@@ -271,10 +280,6 @@ def parse_discovery(
             source_revision=string(
                 cabsdock, "source_revision", path="discovery.cabsdock"
             ),
-            patch_file=resolved_path(
-                string(cabsdock, "patch_file", path="discovery.cabsdock"),
-                config_dir=config_dir,
-            ),
             seed_workers=integer(cabsdock, "seed_workers", path="discovery.cabsdock"),
             peptide_secondary_structure=string(
                 cabsdock,
@@ -320,9 +325,19 @@ def parse_discovery(
                 "trajectory_contact_ca_threshold_A",
                 path="discovery.cabsdock",
             ),
-            max_disulfide_ca_distance_A=number(
+            disulfide_ca_restraint_distance_A=number(
                 cabsdock,
-                "max_disulfide_ca_distance_A",
+                "disulfide_ca_restraint_distance_A",
+                path="discovery.cabsdock",
+            ),
+            disulfide_ca_restraint_weight=number(
+                cabsdock,
+                "disulfide_ca_restraint_weight",
+                path="discovery.cabsdock",
+            ),
+            max_reconstructable_disulfide_ca_distance_A=number(
+                cabsdock,
+                "max_reconstructable_disulfide_ca_distance_A",
                 path="discovery.cabsdock",
             ),
             min_models_for_selection=integer(
@@ -345,12 +360,27 @@ def parse_discovery(
                 "pose_clustering_rmsd_A",
                 path="discovery.cabsdock",
             ),
+            max_sites_per_task=integer(
+                cabsdock,
+                "max_sites_per_task",
+                path="discovery.cabsdock",
+            ),
+            max_pose_clusters_per_site=integer(
+                cabsdock,
+                "max_pose_clusters_per_site",
+                path="discovery.cabsdock",
+            ),
         ),
         qualification=DiscoveryQualificationSettings(
             seeds=_seeds(qualification["seeds"], name="discovery.qualification.seeds"),
             control_bound_state_id=string(
                 qualification,
                 "control_bound_state_id",
+                path="discovery.qualification",
+            ),
+            control_receptor_id=string(
+                qualification,
+                "control_receptor_id",
                 path="discovery.qualification",
             ),
             control_target_id=string(
@@ -368,14 +398,29 @@ def parse_discovery(
                 "max_native_ligand_rmsd_A",
                 path="discovery.qualification",
             ),
+            max_native_site_centroid_distance_A=number(
+                qualification,
+                "max_native_site_centroid_distance_A",
+                path="discovery.qualification",
+            ),
             min_native_receptor_contact_fraction=number(
                 qualification,
                 "min_native_receptor_contact_fraction",
                 path="discovery.qualification",
             ),
-            min_successful_control_seeds=integer(
+            min_native_sampling_seed_support=integer(
                 qualification,
-                "min_successful_control_seeds",
+                "min_native_sampling_seed_support",
+                path="discovery.qualification",
+            ),
+            min_native_site_seed_support=integer(
+                qualification,
+                "min_native_site_seed_support",
+                path="discovery.qualification",
+            ),
+            min_selection_native_seed_recall_fraction=number(
+                qualification,
+                "min_selection_native_seed_recall_fraction",
                 path="discovery.qualification",
             ),
             topology_calibration_status=string(
@@ -426,6 +471,11 @@ def parse_discovery(
                     "min_interchain_heavy_atom_distance_A",
                     path="discovery.qualification.topology_calibration",
                 ),
+                min_nonlocal_peptide_heavy_atom_distance_A=number(
+                    topology_calibration,
+                    "min_nonlocal_peptide_heavy_atom_distance_A",
+                    path="discovery.qualification.topology_calibration",
+                ),
                 max_peptide_internal_ca_rmsd_A=number(
                     topology_calibration,
                     "max_peptide_internal_ca_rmsd_A",
@@ -446,14 +496,19 @@ def parse_discovery(
                     "min_receptor_contact_retention_fraction",
                     path="discovery.qualification.topology_calibration",
                 ),
-                max_refine_fa_rep_per_residue=number(
+                site_coordinate_constraint_flat_width_A=number(
                     topology_calibration,
-                    "max_refine_fa_rep_per_residue",
+                    "site_coordinate_constraint_flat_width_A",
                     path="discovery.qualification.topology_calibration",
                 ),
-                max_refine_backbone_strain_per_residue=number(
+                site_coordinate_constraint_sd_A=number(
                     topology_calibration,
-                    "max_refine_backbone_strain_per_residue",
+                    "site_coordinate_constraint_sd_A",
+                    path="discovery.qualification.topology_calibration",
+                ),
+                site_coordinate_constraint_weight=number(
+                    topology_calibration,
+                    "site_coordinate_constraint_weight",
                     path="discovery.qualification.topology_calibration",
                 ),
             ),

@@ -11,6 +11,7 @@ from vela.discovery.models import (
     DiscoveryTargetSettings,
     ReceptorEnsembleSettings,
 )
+from vela.discovery.qualification.schemas import REPORT_SCHEMA
 from vela.preparation.chemistry import ChemistryDefinition
 from vela.preparation.readiness import assess_preparation_readiness
 from vela.preparation.receptors.models import (
@@ -89,13 +90,6 @@ def _method_issues(
                 f"CABS source directory is missing: {cabsdock.source_dir}",
             )
         )
-    if not cabsdock.patch_file.is_file():
-        issues.append(
-            ReadinessIssue(
-                "cabsdock_patch_missing",
-                f"CABS patch file is missing: {cabsdock.patch_file}",
-            )
-        )
     if len(cabsdock.peptide_secondary_structure) != len(chemistry.sequence):
         issues.append(
             ReadinessIssue(
@@ -151,7 +145,7 @@ def _method_issues(
                 "min_receptor_support": target.analysis.min_receptor_support,
             }
             if (
-                document.get("schema") != "vela.discovery-qualification-report/4"
+                document.get("schema") != REPORT_SCHEMA
                 or document.get("status") != "qualified"
                 or document.get("target_id") != target.target_id
                 or any(recommended.get(key) != value for key, value in expected.items())

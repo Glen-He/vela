@@ -128,7 +128,7 @@ def audit_native_recovery_before_filtering(
     native_pair_path: Path,
     chemistry: ChemistryDefinition,
     max_ligand_ca_rmsd_A: float,
-    max_disulfide_ca_distance_A: float,
+    max_reconstructable_disulfide_ca_distance_A: float,
     contact_ca_threshold_A: float,
     min_native_receptor_contact_fraction: float,
 ) -> NativeTrajectoryAudit:
@@ -175,7 +175,7 @@ def audit_native_recovery_before_filtering(
         ligand_rmsd = _positions_rmsd(moving_peptide, native_positions)
         topology_feasible = (
             _raw_topology_distance(frame.chain_ca[-1], chemistry=chemistry)
-            <= max_disulfide_ca_distance_A
+            <= max_reconstructable_disulfide_ca_distance_A
         )
         pose_contacts = {
             f"{number}{insertion}"
@@ -240,7 +240,8 @@ def audit_native_recovery_before_filtering(
             for bond in chemistry.disulfide_bonds
         )
         topology_feasible = (
-            bool(distances) and max(distances) <= max_disulfide_ca_distance_A
+            bool(distances)
+            and max(distances) <= max_reconstructable_disulfide_ca_distance_A
         )
         if topology_feasible:
             filtered_best_rmsd = (

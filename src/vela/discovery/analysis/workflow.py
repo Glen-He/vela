@@ -94,7 +94,7 @@ def _completed_tasks(run_dir: Path) -> tuple[dict[str, TaskIdentity], str, str]:
         or not is_current_vela_software(plan.get("software"))
     ):
         raise DiscoveryError("run manifest has an invalid blind evidence category")
-    if plan.get("schema") != "vela.discovery-run-manifest/4":
+    if plan.get("schema") != "vela.discovery-run-manifest/5":
         raise DiscoveryError("discovery run manifest schema is invalid")
     planned_tasks = _task_identities(
         plan, status_field="status", required_status="planned"
@@ -119,7 +119,7 @@ def _completed_tasks(run_dir: Path) -> tuple[dict[str, TaskIdentity], str, str]:
         value = software.get(field)
         if not isinstance(value, str) or not value.strip():
             raise DiscoveryError(f"sampling manifest must record {field}")
-    if sampling.get("schema") != "vela.discovery-sampling-manifest/4":
+    if sampling.get("schema") != "vela.discovery-sampling-manifest/5":
         raise DiscoveryError("sampling manifest schema is invalid")
     completed_tasks = _task_identities(
         sampling, status_field="execution_status", required_status="completed"

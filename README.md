@@ -5,13 +5,17 @@ Vela 用于研究裸 P15 环肽与人源 CK2α、CK2α′催化亚基的潜在�
 多状态序列设计和多重复 MD 逐层验证。计算结果用于形成可实验检验的结构假设，
 不能单独证明酶抑制、细胞效应或抗肿瘤疗效。
 
-阶段一已经完成，并可把 9 个受体的原始/审计资产、P15 化学记录和 4 个 apo/apo-like
-受体制备结构直接交给阶段二。阶段二已选定 CABS-dock 3.0.12 的原生二硫键粗粒化协议
-并完成运行适配器；开发与旧正式 4IB5/Pc 运行暴露了科学 QC 异常传播、粗粒化拓扑
-命名和 Top-1000/Top-10 候选丢失问题。当前正式候选从完整 TRAF 做 site-first、
-pose-second 去重并完整保留非冗余 pose 簇；`120631..120638` 用于开发，
-`120639..120646` 用于旧协议失败验证和根因审计，新资格使用未查看的
-`120647..120654`。阶段三已经实现配置驱动的局部恢复控制、
+阶段一已经完成，并可把 10 个受体的原始/审计资产、P15 化学记录、4 个
+apo/apo-like 主受体和 1 个资格控制受体直接交给阶段二。阶段二当前使用
+CABS-dock 3.0.12 的官方
+`--ca-rest-add` 表达二硫环的粗粒化拓扑，不再依赖第三方源码补丁。旧 SG 约束协议的
+三个运行批次均只保留为历史诊断：它们暴露了科学 QC 异常传播、粗粒化拓扑命名、
+Top-1000/Top-10 候选丢失和小样本 seed 投票不稳定等问题。当前候选从完整 TRAF 做
+site-first、pose-second 去重。新 CA 协议的 `120655..120662` 开发批次已完整结束：
+完整轨迹能够重复采样实验姿态，固定候选预算能够保留实验位点，但不保证保留同一低频
+精确姿态；因此阶段二资格已明确拆成“完整池精确姿态采样”和“有限候选位点保留”，
+精确姿态恢复由阶段三局部方法控制。该开发批次同时作为全原子拓扑校准来源；校准冻结后
+必须使用 `120663..120670` 执行正式留出资格。阶段三已经实现配置驱动的局部恢复控制、
 去配体结合态全表面复现、粗粒化 pose 全原子交接、正式候选 FlexPepDock 运行以及
 QC/聚类报告，并补齐跨状态 site 比较、实验骨架 guided 起点、全酶环境映射和候选
 事实卡；真实控制、阶段二正式 candidate 和校准阈值尚未产生，因此各放行门槛仍会
@@ -27,6 +31,15 @@ uv sync
 uv run vela config check
 ```
 
+项目依赖三个项目外的外部运行时，其可执行文件路径在当前机器的 `configs/` 下配置为本机
+绝对路径，更换环境（机器）后需同步调整：
+
+- CABS-dock：`configs/discovery.toml` 的 `[discovery.cabsdock]` 的 `executable` 与 `source_dir`；
+- cg2all 与 Rosetta：`configs/validation.toml` 的 `executable`、`scripts_executable`、`package_metadata` 与 `checkpoint`；
+- Pyright 的 `scripts` 类型解析：项目根 `.env` 的 `PYTHONPATH` 指向本机 CABS 源码根（模板见 `.env.example`，更换环境后更新）。
+
+`uv run vela validation tool-check` 会核对 cg2all 与 Rosetta 的来源、版本和哈希，可用来确认路径配置正确。
+
 阶段一建议使用阶段级入口：
 
 ```bash
@@ -35,7 +48,8 @@ uv run vela preparation run
 ```
 
 `status` 只检查阶段一化学、下载、审计和制备产物，不检查阶段二方法参数；`run` 一次
-执行化学记录、9 个受体下载和审计、4 个 apo/apo-like 受体基础制备，再按 manifest
+执行化学记录、10 个受体下载和审计、4 个 apo/apo-like 主受体及 `3Q9X_A` 资格控制
+受体制备，再按 manifest
 路径、参数和 SHA-256 检查交付完整性。只有阶段一产物不完整或过期时才返回退出码 3。
 需要单独排查时仍可运行底层命令：
 
@@ -80,17 +94,23 @@ uv run vela discovery run --run-dir outputs/runs/<run-id>
 uv run vela discovery analyze --run-dir outputs/runs/<run-id>
 ```
 
-资格流程同样一次只处理一个 target。每个资格 seed 在同一 worker 内先运行 4IB5/Pc
-全表面实验回收控制，再运行该 target 的 apo 技术先导；控制的科学 QC 不合格只会产生
+资格流程同样一次只处理一个 target。每个资格 seed 在同一 worker 内先把 Pc 全局对接
+到公开环肽基准与 4IB5 配对的 unbound `3Q9X_A`，以 4IB5 实验复合物做事后 native
+评价，再运行该 target 的 apo 技术
+先导；控制的科学 QC 不合格只会产生
 `unqualified` 证据，不会中断后续 pilot，只有技术完整性错误才终止任务。实验配体坐标
-只用于控制输出的事后评分，不进入 CABS-dock 搜索命令。site-first 参数在新资格 seed
-运行前已经冻结。独立 `topology-calibration-*` 流程用开发 seed 的分层样本校准粗粒化
+只用于控制输出的事后评分，不进入 CABS-dock 搜索命令。完整轨迹的采样资格要求精确
+姿态进入 5.5 Å FlexPepDock 吸引域；固定候选集只要求在实验位点质心 4 Å 内并恢复至少
+20% 的原生 Cα 接触。候选中的精确姿态召回仍会报告，但不作为阶段二位点发现门槛。
+site-first 参数在正式资格 seed 运行前已经冻结。独立 `topology-calibration-*` 流程用开发 seed 的分层样本校准粗粒化
 Cα 判据能否恢复为合理全原子二硫环，并给出可采用的最大阈值。全原子化时只由 cg2all
 重建肽链，受体使用按 CABS 受体对齐的实验 receptor-only 结构，避免神经网络重建受体
 产生异常 Rosetta 主链应变。它不读取实验配体坐标，
 也不把 Rosetta 引入正式阶段二全表面采样。资格 seed 与正式 seed 完全分离。
-当前 32 模型校准的最大连续通过阈值为 `7 Å`；`8 Å` 层只有 5/8 通过，未达到预注册的
-6/8 门槛。
+旧 SG 约束协议得到的 7 Å 校准不授权当前 CA 约束协议。当前协议已用
+`120655..120662` 的完整 TRAF 完成 native-free 分层校准：局部精修通过肽 C-alpha
+平底坐标约束保持原 site，6/7/8/10 Å 四个候选层均为 8/8 通过，10 Å 已冻结为最大
+连续合格包络；10–12 Å 层只作非门控外部对照。
 第一个 target 通过后，后续 target 可在 `qualification-plan` 增加
 `--control-run outputs/discovery/qualifications/<passed-run-id>`，复用已经通过且逐文件
 校验 SHA-256 的同方法 Pc 控制，只运行新 target 自己的 apo 先导；重复的确定性
@@ -100,10 +120,12 @@ control/seed 任务不会再次计算。
 多个受体构象；CK2α 和 CK2α′必须使用不同 run ID 独立运行。`plan` 只有在 P15 化学、
 当前 target 的主受体、方法资格报告、独立 seeds 和聚类规则全部冻结后才会创建运行
 目录。`run` 按冻结计划执行或复用哈希验证通过的已完成任务，使用
-CABS-dock 原生 `-F` 二硫键、关闭全原子重建，并写出 `sampling_manifest.json` 和规范
+CABS-dock 官方 `--ca-rest-add` Cys C-alpha 距离约束、关闭全原子重建，并写出 `sampling_manifest.json` 和规范
 `pose_evidence.tsv`；`analyze` 随后才生成 site 报告。正式 pose 由完整 10,000 帧 TRAF
-先经过 `topology_feasible`/Cα 受体接触过滤，再按 site 和 site 内姿态分层去重并保留
-全部 pose 簇代表；CABS 原始 Top-1000/Top-10 单独保留为非门控基线。所有阶段二 pose
+先经过 `topology_feasible`/Cα 受体接触过滤，再按 site 和 site 内姿态分层去重。每个
+seed 最多保留 64 个按人口优先的 site、每个 site 最多 4 个 pose 簇，每簇保留 medoid
+与最低相互作用能代表，因此单任务上限为 512；CABS 原始 Top-1000/Top-10 单独保留为
+非门控基线。所有阶段二 pose
 都是粗粒化证据，不冒充全原子结构；
 Rosetta/FlexPepDock 只在阶段三出现。
 
@@ -180,6 +202,7 @@ site reference，不会被自动线程化。guided 起点不能增加 blind 发�
 ```bash
 uv run vela validation handoff-plan \
   --discovery-run outputs/runs/<discovery-run-id> \
+  --candidate-id <reviewed-candidate-id> \
   --run-id <handoff-run-id>
 uv run vela validation handoff-run \
   --run-dir outputs/validation/handoffs/<handoff-run-id>
@@ -289,7 +312,6 @@ Rosetta 的终端许可提示说明商业使用可能需要单独许可；如果
 - `docs/research.md`：实验结构事实、适用范围和限制；
 - `docs/plan.md`：项目方向、阶段状态、证据规则和决策记录。
 - `docs/config.md`：两个配置来源的职责、参数索引和允许覆盖的边界。
-- `docs/cabsdock-patch.md`：CABS-dock 最小源码补丁、环境复现和验证步骤。
 
 `data/` 与 `outputs/` 是可再生成的本地运行产物，已从版本控制中排除。原始 mmCIF
 只读保存在 `data/receptors/raw/`；受体制备不会覆盖它，而是在
@@ -376,7 +398,7 @@ apo/apo-like 主发现受体，加阶段三 3 个去配体结合态复现受体�
 ```bash
 uv run ruff format --check src tests
 uv run ruff check src tests
-uv run pyright
+uv run --env-file .env pyright
 uv run pytest
 ```
 

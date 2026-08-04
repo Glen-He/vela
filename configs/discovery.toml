@@ -1,7 +1,7 @@
 [discovery]
 # 方法、资格报告和 seed 是项目决定，不提供伪造的包内 production 默认值。
-method_id = "cabsdock-global-disulfide-site-first-cg"
-adapter_id = "vela-cabsdock-site-first-cg"
+method_id = "cabsdock-global-cyclic-ca-restraint-site-first-cg"
+adapter_id = "vela-cabsdock-cyclic-site-first-cg"
 # 正式主发现对每个受体构象使用 8 个独立重复。
 seeds = [120623, 120624, 120625, 120626, 120627, 120628, 120629, 120630]
 
@@ -10,41 +10,49 @@ seeds = [120623, 120624, 120625, 120626, 120627, 120628, 120629, 120630]
 executable = "/home/glen/apps/cabsflex/.venv-cabs/bin/CABSdock"
 source_dir = "/home/glen/apps/cabsflex"
 source_revision = "36ec10e681d0b6c5c991101bc0bdfc6e224c5e0b"
-patch_file = "../patches/cabsdock-3.0.12-disulfide-cli.patch"
 # 每个 worker 独占一个 seed，并按配置顺序执行该目标的所有受体构象。
 seed_workers = 8
-# 不给 P15 施加螺旋或折叠先验；二硫键另由 chemistry 定义生成 -F。
+# 不给 P15 施加螺旋或折叠先验；二硫环使用 CABS 官方 Cα 距离约束表示。
 peptide_secondary_structure = "CCCCCCCCCCC"
-# 4IB5/Pc 分层全原子可恢复性校准选择的最大连续通过阈值。
-max_disulfide_ca_distance_A = 7.0
+# 5.5 Å 对应实验二硫键常见 Cys Cα 间距；10 Å 只是进入全原子重建的候选包络。
+disulfide_ca_restraint_distance_A = 5.5
+disulfide_ca_restraint_weight = 1.0
+max_reconstructable_disulfide_ca_distance_A = 10.0
 
 [discovery.qualification]
-# 120639..120646 已用于旧协议失败诊断；当前完整 TRAF 选择合同使用未查看的新随机流。
-seeds = [120647, 120648, 120649, 120650, 120651, 120652, 120653, 120654]
-# 4IB5/Pc 是标准氨基酸二硫环肽阳性控制，可直接检验已知位点全局回收。
+# 120655..120662 已用于 site/pose 资格边界开发；正式验证使用未查看的随机流。
+seeds = [120663, 120664, 120665, 120666, 120667, 120668, 120669, 120670]
+# 用公开基准配对的 unbound 3Q9X_A 全局重对接 Pc；3Q04_A 仍是 P15 的项目 apo pilot，
+# 4IB5 只提供控制肽化学身份与 native 评价坐标。
 control_bound_state_id = "4IB5_A_D"
+control_receptor_id = "3Q9X_A"
 control_target_id = "ck2_alpha"
 control_secondary_structure = "CCCCCCCCCCCCC"
 # CABS-dock 环肽基准以 5.5 Å L-RMSD 定义可进入 FlexPepDock 精修吸引域；
 # 接触项使用 Cα 粗粒化表示，不冒充全原子 residue-pair CAPRI Fnat。
 max_native_ligand_rmsd_A = 5.5
+# 有限候选只负责保留结合位点；精确 pose 恢复由阶段三方法控制负责。
+max_native_site_centroid_distance_A = 4.0
 min_native_receptor_contact_fraction = 0.20
-min_successful_control_seeds = 4
-# 开发 seed 的分层校准已完成；8 Å 未达到 6/8 门槛，因此正式阈值冻结为 7 Å。
+# 采样、选择和位点重复性分别判断，避免把一个 4/8 投票门槛重复使用三次。
+min_native_sampling_seed_support = 2
+min_native_site_seed_support = 2
+min_selection_native_seed_recall_fraction = 1.0
+# 采样约束和可重建包络均已改变，旧拓扑校准不得继续授权新协议。
 topology_calibration_status = "qualified"
-topology_calibration_report = "../outputs/discovery/topology_calibrations/4ib5-pc-topology-calibration-20260802/topology_calibration_report.json"
-topology_calibration_report_sha256 = "7b688b44b036a8d561090e00394a22b51228af3f99c9bca295e2b1eb128df910"
+topology_calibration_report = "../outputs/discovery/topology_calibrations/ck2-alpha-ca-constrained-topology-20260804/topology_calibration_report.json"
+topology_calibration_report_sha256 = "b3a24d6ea8531246b523d33b9e8c2998f01d4f899b3cf11faf2c74151fd25659"
 
 [discovery.qualification.topology_calibration]
-# 每层固定抽取 8 个模型并优先覆盖 8 个开发 seed。校准从候选值中选择
-# 连续通过分层判据的最大 CA 阈值；10 Å 层只作为阈值外对照。
-candidate_ca_thresholds_A = [6.0, 7.0, 8.0]
-above_threshold_comparator_upper_bound_A = 10.0
+# 每层固定抽取 8 个模型并优先覆盖 8 个开发 seed；12 Å 是包络外对照。
+candidate_ca_thresholds_A = [6.0, 7.0, 8.0, 10.0]
+above_threshold_comparator_upper_bound_A = 12.0
 models_per_stratum = 8
 min_success_fraction_per_stratum = 0.75
 min_successful_seeds_per_stratum = 6
 # 小于该值视为不可接受的受体—肽重原子穿插；更严格的界面 QC 留给阶段三资格。
 min_interchain_heavy_atom_distance_A = 1.2
+min_nonlocal_peptide_heavy_atom_distance_A = 1.2
 # 4 Å 与肽对接 acceptable-quality 的位置尺度一致；接触保持用于防止仅靠大幅
 # 改写粗粒化姿态来强行闭环。这些是校准前冻结的 pose 保真判据，不是亲和力阈值。
 max_peptide_internal_ca_rmsd_A = 4.0
@@ -52,10 +60,13 @@ max_ligand_centroid_displacement_A = 4.0
 # 输入与输出都使用同一 Cα 表示，避免把 CABS SC 伪中心和全原子 CB 错当成同一种原子。
 contact_ca_threshold_A = 10.0
 min_receptor_contact_retention_fraction = 0.5
-# 使用按复合物残基数归一化的 Rosetta weighted term，避免受体大小直接改变门槛。
-# 当前界限能排除 cg2all 整体重建受体产生的明显主链应变，同时给实验受体 graft 留余量。
-max_refine_fa_rep_per_residue = 2.0
-max_refine_backbone_strain_per_residue = 1.0
+# 拓扑精修只允许在每个肽 Cα 的初始位置周围做有限调整，避免闭环优化变成第二次
+# 无约束局部对接。2 Å 平底区允许环骨架松弛，1 Å 标准差和单位权重惩罚更大漂移。
+site_coordinate_constraint_flat_width_A = 2.0
+site_coordinate_constraint_sd_A = 1.0
+site_coordinate_constraint_weight = 1.0
+# Rosetta score terms 仍完整记录，但不再用“总复合物分数/全部受体残基”充当局部环肽
+# 质量门槛；该归一化会被 300 多个受体残基稀释。资格门槛改用直接几何与 pose 保真判据。
 
 [discovery.targets.ck2_alpha]
 reference_receptor = "3Q04_A"
@@ -63,11 +74,11 @@ pilot_receptor = "3Q04_A"
 qualification_status = "unresolved"
 qualification_report = "unresolved"
 qualification_report_sha256 = "unresolved"
-# 已由 120631..120638 开发数据冻结；120647..120654 只验证，不再选网格。
+# site 距离沿用预声明值；新 CA 约束开发与留出批次均不得用 native 重新选网格。
 contact_jaccard_distance = 0.8
 position_distance_A = 12.0
 min_seed_support = 2
-min_receptor_support = 1
+min_receptor_support = 2
 
 [discovery.targets.ck2_alpha_prime]
 reference_receptor = "5YF9_X"
@@ -79,4 +90,4 @@ qualification_report_sha256 = "unresolved"
 contact_jaccard_distance = 0.8
 position_distance_A = 12.0
 min_seed_support = 2
-min_receptor_support = 1
+min_receptor_support = 2

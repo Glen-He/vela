@@ -110,7 +110,7 @@ def read_refinement_source(
             evidence_category=BLIND_REFINEMENT_EVIDENCE,
             known_site_information_used=False,
         )
-        expected_schema = "vela.validation-handoff-manifest/2"
+        expected_schema = "vela.validation-handoff-manifest/3"
         source_plan_key = "handoff_plan"
         expected_source_evidence = "main_discovery_handoff"
     else:

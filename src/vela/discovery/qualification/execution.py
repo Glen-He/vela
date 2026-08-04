@@ -30,6 +30,7 @@ from vela.discovery.qualification.planning import (
     build_qualification_cases,
     case_records,
 )
+from vela.discovery.qualification.schemas import PLAN_SCHEMA, SAMPLING_SCHEMA
 from vela.discovery.sampling.cabsdock import (
     cabsdock_archive_path,
     verify_cabsdock_tool,
@@ -106,7 +107,7 @@ def run_qualification(*, config: AppConfig, run_dir: Path) -> None:
     plan = _document(plan_path)
     target_id = plan.get("target_id")
     if (
-        plan.get("schema") != "vela.discovery-qualification-plan/4"
+        plan.get("schema") != PLAN_SCHEMA
         or plan.get("status") != "planned"
         or not is_current_vela_software(plan.get("software"))
         or not isinstance(target_id, str)
@@ -206,6 +207,11 @@ def run_qualification(*, config: AppConfig, run_dir: Path) -> None:
                 evidence.trajectory_audit.topology_feasible_enrichment_ratio
             ),
             "selected_model_count": len(evidence.poses),
+            "selected_model_budget": (
+                config.discovery.cabsdock.max_sites_per_task
+                * config.discovery.cabsdock.max_pose_clusters_per_site
+                * 2
+            ),
             "baseline_model_count": len(evidence.baseline_poses),
         }
         if case.task.evidence_category == CONTROL_RECOVERY:
@@ -220,8 +226,8 @@ def run_qualification(*, config: AppConfig, run_dir: Path) -> None:
                 max_ligand_ca_rmsd_A=(
                     config.discovery.qualification.max_native_ligand_rmsd_A
                 ),
-                max_disulfide_ca_distance_A=(
-                    config.discovery.cabsdock.max_disulfide_ca_distance_A
+                max_reconstructable_disulfide_ca_distance_A=(
+                    config.discovery.cabsdock.max_reconstructable_disulfide_ca_distance_A
                 ),
                 contact_ca_threshold_A=(
                     config.discovery.cabsdock.trajectory_contact_ca_threshold_A
@@ -310,7 +316,7 @@ def run_qualification(*, config: AppConfig, run_dir: Path) -> None:
     atomic_write_json(
         run_dir / "qualification_sampling.json",
         {
-            "schema": "vela.discovery-qualification-sampling/4",
+            "schema": SAMPLING_SCHEMA,
             "stage": "discovery_qualification",
             "status": "sampling_completed",
             "target_id": target_id,

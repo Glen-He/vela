@@ -6,11 +6,40 @@ import argparse
 import json
 import tarfile
 import tempfile
+from collections.abc import Iterable, Iterator
 from copy import deepcopy
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from CABS.core.trajectory import Trajectory
 from CABS.structures.atom import Atoms
+
+
+@runtime_checkable
+class _ObjectMapping(Protocol):
+    def items(self) -> Iterable[tuple[object, object]]: ...
+
+
+@runtime_checkable
+class _ObjectIterable(Protocol):
+    def __iter__(self) -> Iterator[object]: ...
+
+
+def _mapping(value: object, *, name: str) -> dict[str, object]:
+    if not isinstance(value, _ObjectMapping):
+        raise ValueError(f"{name} must be an object")
+    result: dict[str, object] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise ValueError(f"{name} keys must be strings")
+        result[key] = item
+    return result
+
+
+def _list(value: object, *, name: str) -> list[object]:
+    if not isinstance(value, _ObjectIterable) or value.__class__ is not list:
+        raise ValueError(f"{name} must be a list")
+    return list(value)
 
 
 def _arguments() -> argparse.Namespace:
@@ -22,24 +51,29 @@ def _arguments() -> argparse.Namespace:
 
 
 def _selection(path: Path) -> tuple[tuple[int, int], ...]:
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or set(value) != {"frames"}:
+    value: object = json.loads(path.read_text(encoding="utf-8"))
+    document = _mapping(value, name="selection")
+    if set(document) != {"frames"}:
         raise ValueError("selection must contain only frames")
-    rows = value["frames"]
-    if not isinstance(rows, list) or not rows:
+    rows = _list(document["frames"], name="selection frames")
+    if not rows:
         raise ValueError("selection frames must be a non-empty list")
-    identities = []
-    for row in rows:
+    identities: list[tuple[int, int]] = []
+    for raw_row in rows:
+        row = _mapping(raw_row, name="selection frame identity")
+        replica = row.get("replica")
+        model = row.get("model")
         if (
-            not isinstance(row, dict)
-            or set(row) != {"replica", "model"}
-            or not isinstance(row["replica"], int)
-            or not isinstance(row["model"], int)
-            or row["replica"] < 1
-            or row["model"] < 1
+            set(row) != {"replica", "model"}
+            or not isinstance(replica, int)
+            or isinstance(replica, bool)
+            or not isinstance(model, int)
+            or isinstance(model, bool)
+            or replica < 1
+            or model < 1
         ):
             raise ValueError("selection frame identity is invalid")
-        identities.append((row["replica"], row["model"]))
+        identities.append((replica, model))
     if len(identities) != len(set(identities)):
         raise ValueError("selection contains duplicate frame identities")
     return tuple(identities)

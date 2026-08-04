@@ -31,13 +31,15 @@ def cabsdock_parameters(config: AppConfig) -> dict[str, JsonValue]:
     settings = config.discovery.cabsdock
     return {
         "executable": settings.executable.as_posix(),
+        "executable_sha256": sha256_file(settings.executable),
         "source_dir": settings.source_dir.as_posix(),
         "source_revision": settings.source_revision,
         "critical_source_files": cabsdock_source_records(settings),
         "trajectory_materializer": materializer_record(),
-        "patch": {
-            "path": settings.patch_file.as_posix(),
-            "sha256": sha256_file(settings.patch_file),
+        "disulfide_ca_restraint": {
+            "representation": "CABS_CA_pseudoatom_distance_restraint",
+            "distance_A": settings.disulfide_ca_restraint_distance_A,
+            "weight": settings.disulfide_ca_restraint_weight,
         },
         "seed_workers": settings.seed_workers,
         "peptide_secondary_structure": settings.peptide_secondary_structure,
@@ -62,7 +64,9 @@ def cabsdock_parameters(config: AppConfig) -> dict[str, JsonValue]:
         "trajectory_contact_ca_threshold_A": (
             settings.trajectory_contact_ca_threshold_A
         ),
-        "max_disulfide_ca_distance_A": settings.max_disulfide_ca_distance_A,
+        "max_reconstructable_disulfide_ca_distance_A": (
+            settings.max_reconstructable_disulfide_ca_distance_A
+        ),
         "min_models_for_selection": settings.min_models_for_selection,
         "candidate_selection": candidate_selection_contract(settings),
         "all_atom_reconstruction": False,
@@ -251,7 +255,7 @@ def write_sampling_plan(
     atomic_write_json(
         run_dir / "run_manifest.json",
         {
-            "schema": "vela.discovery-run-manifest/4",
+            "schema": "vela.discovery-run-manifest/5",
             "run_id": run_id,
             "target_id": target_id,
             "stage": "discovery",

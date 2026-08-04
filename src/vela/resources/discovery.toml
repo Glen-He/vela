@@ -25,13 +25,19 @@ clustering_medoids = 10
 clustering_iterations = 100
 # 完整 TRAF 只有 Cα；10 Å 是粗粒化位点接触定义，不冒充全原子重原子接触。
 trajectory_contact_ca_threshold_A = 10.0
-# 这里只判断 CABS CA 几何能否进入全原子拓扑重建，不代表二硫键已经形成。
-max_disulfide_ca_distance_A = 8.0
+# 使用 CABS 官方 Cα 距离约束表达环拓扑；5.5 Å 接近实验二硫键的 Cys Cα 间距。
+disulfide_ca_restraint_distance_A = 5.5
+disulfide_ca_restraint_weight = 1.0
+# 这是送入全原子重建的候选包络，不表示粗粒化模型已经形成化学键。
+max_reconstructable_disulfide_ca_distance_A = 10.0
 # 纯技术下限：少于该数量时不运行聚类；它不是 topology 科学资格门槛。
 min_models_for_selection = 10
 # 先用宽松位点边界保留全表面区域，再在位点内按肽 CA RMSD 去除重复姿态。
 selection_contact_jaccard_distance = 0.8
 selection_position_distance_A = 12.0
 pose_clustering_rmsd_A = 4.0
-# 不按能量或簇密度截断低频 pose 簇；每簇交付 medoid 与最低相互作用能代表，
-# 后续由跨 seed 位点支持和阶段三的起点预算收敛计算规模。
+# 每个 seed 先保留最多 64 个按人口排序的表面位点，每个位点最多保留 4 个
+# 按人口排序的姿态簇；每簇交付 medoid 与最低相互作用能代表。单任务因此最多
+# 交付 512 个候选，跨 seed 支持只负责复核，不得靠无限候选把回收率做成平凡指标。
+max_sites_per_task = 64
+max_pose_clusters_per_site = 4

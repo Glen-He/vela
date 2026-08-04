@@ -81,15 +81,21 @@ def _validate_cross_section(config: AppConfig) -> None:
         raise ConfigError(
             "discovery qualification control must reference a standard cyclic peptide bound state"
         )
-    control_receptor = receptor_by_id.get(control_state.receptor_id)
+    native_receptor = receptor_by_id.get(control_state.receptor_id)
+    control_receptor = receptor_by_id.get(
+        config.discovery.qualification.control_receptor_id
+    )
     configured_targets = {target.target_id for target in config.discovery.targets}
     if (
         config.discovery.qualification.control_target_id not in configured_targets
+        or native_receptor is None
+        or native_receptor.target != config.discovery.qualification.control_target_id
         or control_receptor is None
         or control_receptor.target != config.discovery.qualification.control_target_id
+        or "qualification_control" not in control_receptor.roles
     ):
         raise ConfigError(
-            "discovery qualification control_target_id must match its bound-state receptor"
+            "discovery qualification control receptor must match control_target_id"
         )
     if control_state.ligand_sequence is None or len(
         config.discovery.qualification.control_secondary_structure
@@ -97,7 +103,9 @@ def _validate_cross_section(config: AppConfig) -> None:
         raise ConfigError(
             "discovery qualification control secondary structure length must match its ligand"
         )
-    topology_threshold = config.discovery.cabsdock.max_disulfide_ca_distance_A
+    topology_threshold = (
+        config.discovery.cabsdock.max_reconstructable_disulfide_ca_distance_A
+    )
     topology_candidates = (
         config.discovery.qualification.topology_calibration.candidate_ca_thresholds_A
     )

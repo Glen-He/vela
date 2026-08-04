@@ -307,7 +307,7 @@ def audit_cabs_trajectory(
     chemistry: ChemistryDefinition,
     replicas: int,
     filtering_count: int,
-    max_disulfide_ca_distance_A: float,
+    max_reconstructable_disulfide_ca_distance_A: float,
     filtered_topology_feasible_by_replica: tuple[int, ...],
 ) -> CabsTrajectoryAudit:
     """重放 CABS each-replica 过滤, 并返回真实能量和拓扑统计。"""
@@ -358,7 +358,8 @@ def audit_cabs_trajectory(
         if len(frames) < per_replica_filter:
             raise DiscoveryError("CABS TRAF is smaller than the frozen filter budget")
         topology_count = sum(
-            distance <= max_disulfide_ca_distance_A for _, _, distance in frames
+            distance <= max_reconstructable_disulfide_ca_distance_A
+            for _, _, distance in frames
         )
         # 上游 np.argsort 的并列顺序不稳定, 但并列项能量相同; 这里只映射真实能量值。
         ordered = sorted(frames, key=lambda item: item[1])
@@ -368,8 +369,14 @@ def audit_cabs_trajectory(
         mandatory = tuple(item for item in frames if item[1] < cutoff)
         tied = tuple(item for item in frames if item[1] == cutoff)
         tied_needed = per_replica_filter - len(mandatory)
-        lower = max_disulfide_ca_distance_A - PDB_DISTANCE_ROUNDING_TOLERANCE_A
-        upper = max_disulfide_ca_distance_A + PDB_DISTANCE_ROUNDING_TOLERANCE_A
+        lower = (
+            max_reconstructable_disulfide_ca_distance_A
+            - PDB_DISTANCE_ROUNDING_TOLERANCE_A
+        )
+        upper = (
+            max_reconstructable_disulfide_ca_distance_A
+            + PDB_DISTANCE_ROUNDING_TOLERANCE_A
+        )
         mandatory_definite = sum(distance <= lower for _, _, distance in mandatory)
         mandatory_possible = sum(distance <= upper for _, _, distance in mandatory)
         tied_definite = sum(distance <= lower for _, _, distance in tied)

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+
+import gemmi
 
 from vela.config import AppConfig
 from vela.core.provenance import (
@@ -27,19 +30,36 @@ from vela.discovery.analysis.cluster_engine import (
 from vela.discovery.models import DiscoveryError
 from vela.discovery.qualification.control import control_bound_state, control_chemistry
 from vela.discovery.qualification.planning import CONTROL_RECOVERY
-from vela.discovery.sampling.cabsdock import cabsdock_archive_path
+from vela.discovery.qualification.schemas import (
+    PLAN_SCHEMA as QUALIFICATION_PLAN_SCHEMA,
+)
+from vela.discovery.qualification.schemas import (
+    SAMPLING_SCHEMA as QUALIFICATION_SAMPLING_SCHEMA,
+)
+from vela.discovery.sampling.cabsdock import (
+    CABS_TASK_RESULT_SCHEMA,
+    cabsdock_archive_path,
+    verify_cabsdock_tool,
+)
 from vela.discovery.sampling.evidence import (
-    align_receptor,
-    ca_contact_residues,
+    align_trajectory_receptor,
     centroid,
     disulfide_ca_distance,
     disulfide_cabs_sc_distance,
     read_reference_chains,
     read_structure,
-    required_atom,
     split_model,
+    trajectory_ca_contact_residues,
 )
-from vela.discovery.sampling.trajectory import audit_cabs_trajectory
+from vela.discovery.sampling.materialization import (
+    CabsFrameIdentity,
+    materialize_cabs_frames,
+)
+from vela.discovery.sampling.trajectory import (
+    iter_cabs_trajectory,
+    read_cabs_sequence,
+    trajectory_disulfide_ca_distance,
+)
 from vela.validation.models import ValidationError
 from vela.validation.records import file_record, validate_record
 from vela.validation.refinement.reconstruction import (
@@ -48,6 +68,7 @@ from vela.validation.refinement.reconstruction import (
     verify_cg2all_tool,
     write_cg2all_input,
     write_disulfide_indices,
+    write_peptide_site_coordinate_constraints,
     write_reference_receptor_complex,
     write_topology_rebuild_protocol,
 )
@@ -65,25 +86,22 @@ from vela.validation.scores import read_rosetta_scorefile
 PLAN_NAME = "topology_calibration_plan.json"
 MANIFEST_NAME = "topology_calibration_manifest.json"
 REPORT_NAME = "topology_calibration_report.json"
-PLAN_SCHEMA = "vela.disulfide-topology-calibration-plan/2"
-TASK_SCHEMA = "vela.disulfide-topology-calibration-task-result/2"
-MANIFEST_SCHEMA = "vela.disulfide-topology-calibration-manifest/2"
-REPORT_SCHEMA = "vela.disulfide-topology-calibration-report/2"
+PLAN_SCHEMA = "vela.disulfide-topology-calibration-plan/5"
+TASK_SCHEMA = "vela.disulfide-topology-calibration-task-result/5"
+MANIFEST_SCHEMA = "vela.disulfide-topology-calibration-manifest/5"
+REPORT_SCHEMA = "vela.disulfide-topology-calibration-report/5"
 
 
 @dataclass(frozen=True, slots=True)
 class _Candidate:
-    """一个带真实 CABS 能量和位点特征的 Top-1000 模型。"""
+    """一个来自完整 TRAF 的 native-free 拓扑校准候选。"""
 
     task_id: str
     seed: int
-    model_path: Path
-    model_sha256: str
-    model_index: int
+    frame_identity: CabsFrameIdentity
     archive_path: Path
     archive_sha256: str
     ca_distance_A: float
-    cabs_sc_distance_A: float
     interaction_energy: float
     contact_residues: frozenset[str]
     local_position: tuple[float, float, float]
@@ -91,7 +109,10 @@ class _Candidate:
 
     @property
     def identity(self) -> str:
-        return f"{self.task_id}__model_{self.model_index:04d}"
+        return (
+            f"{self.task_id}__traf_r{self.frame_identity.replica:02d}_"
+            f"m{self.frame_identity.model:04d}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +133,14 @@ class _ControlSource:
     reference_sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class _SourceEvidence:
+    """经完整哈希链验证的资格采样来源。"""
+
+    sampling_path: Path
+    task_result_paths: tuple[Path, ...]
+
+
 def topology_calibration_contract(config: AppConfig) -> dict[str, JsonValue]:
     """返回资格计划和校准报告必须完全一致的方法合同。"""
     calibration = config.discovery.qualification.topology_calibration
@@ -129,11 +158,12 @@ def topology_calibration_contract(config: AppConfig) -> dict[str, JsonValue]:
         "stratified_sampling": {
             "ca_strata_upper_bounds_A": list(calibration.strata_upper_bounds_A),
             "models_per_stratum": calibration.models_per_stratum,
+            "source_pool": "complete_CABS_TRAF_before_energy_filtering",
             "coverage_dimensions": [
                 "seed",
                 "binding_site",
                 "cabsdock_interaction_energy",
-                "cabs_SC_pseudocenter_distance",
+                "disulfide_endpoint_CA_distance",
             ],
             "native_information_used": False,
         },
@@ -141,7 +171,7 @@ def topology_calibration_contract(config: AppConfig) -> dict[str, JsonValue]:
             "pipeline": (
                 "cg2all_peptide_then_aligned_experimental_receptor_graft_then_"
                 "RosettaScripts_ForceDisulfides_repack_then_FlexPepDock_prepack_"
-                "then_single_local_refine"
+                "then_site_coordinate_constrained_single_local_refine"
             ),
             "cg2all_representation": config.validation.cg2all.representation,
             "cg2all_checkpoint_sha256": (config.validation.cg2all.checkpoint_sha256),
@@ -162,12 +192,18 @@ def topology_calibration_contract(config: AppConfig) -> dict[str, JsonValue]:
             "min_interchain_heavy_atom_distance_A": (
                 calibration.min_interchain_heavy_atom_distance_A
             ),
-            "max_refine_weighted_fa_rep_per_residue": (
-                calibration.max_refine_fa_rep_per_residue
+            "min_nonlocal_peptide_heavy_atom_distance_A": (
+                calibration.min_nonlocal_peptide_heavy_atom_distance_A
             ),
-            "max_refine_weighted_backbone_strain_per_residue": (
-                calibration.max_refine_backbone_strain_per_residue
-            ),
+            "site_coordinate_constraints": {
+                "atoms": "all_peptide_CA",
+                "reference_frame": "fixed_receptor_first_CA",
+                "function": "FLAT_HARMONIC",
+                "flat_width_A": (calibration.site_coordinate_constraint_flat_width_A),
+                "standard_deviation_A": (calibration.site_coordinate_constraint_sd_A),
+                "score_weight": calibration.site_coordinate_constraint_weight,
+            },
+            "rosetta_score_terms_are_descriptive": True,
             "terminal_chemistry_assessed": False,
         },
         "qualification_rule": {
@@ -233,12 +269,98 @@ def _source_run(*, config: AppConfig, source_run: Path) -> Path:
     return resolved
 
 
+def validate_topology_source_evidence(
+    *, source_run: Path, source_plan: Mapping[str, object]
+) -> _SourceEvidence:
+    """验证资格计划、采样清单、任务结果和 CABS 归档的完整证据链。"""
+    plan_path = source_run / "qualification_plan.json"
+    sampling_path = source_run / "qualification_sampling.json"
+    sampling = _document(sampling_path, name="source qualification sampling")
+    if (
+        sampling.get("schema") != QUALIFICATION_SAMPLING_SCHEMA
+        or sampling.get("stage") != "discovery_qualification"
+        or sampling.get("status") != "sampling_completed"
+        or sampling.get("target_id") != source_plan.get("target_id")
+        or sampling.get("qualification_plan_sha256") != sha256_file(plan_path)
+    ):
+        raise DiscoveryError("source qualification sampling identity is invalid")
+    try:
+        planned_rows = object_list(
+            source_plan.get("tasks"), name="source qualification plan tasks"
+        )
+        sampled_rows = object_list(
+            sampling.get("tasks"), name="source qualification sampling tasks"
+        )
+    except TypeError as exc:
+        raise DiscoveryError("source qualification task records are invalid") from exc
+    planned_ids = tuple(
+        _required_text(
+            object_mapping(row, name="source planned task"),
+            "task_id",
+            name="source planned task_id",
+        )
+        for row in planned_rows
+    )
+    sampled_by_id: dict[str, dict[str, object]] = {}
+    for raw_row in sampled_rows:
+        try:
+            row = object_mapping(raw_row, name="source sampled task")
+        except TypeError as exc:
+            raise DiscoveryError("source sampled task is invalid") from exc
+        task_id = _required_text(row, "task_id", name="source sampled task_id")
+        if task_id in sampled_by_id or row.get("execution_status") != "completed":
+            raise DiscoveryError("source qualification sampling tasks are incomplete")
+        sampled_by_id[task_id] = row
+    if len(set(planned_ids)) != len(planned_ids) or set(sampled_by_id) != set(
+        planned_ids
+    ):
+        raise DiscoveryError("source qualification tasks differ across evidence files")
+
+    plan_sha256 = sha256_file(plan_path)
+    result_paths: list[Path] = []
+    for task_id in planned_ids:
+        task_dir = source_run / "tasks" / task_id
+        result_path = task_dir / "task_result.json"
+        result = _document(result_path, name=f"source task result {task_id}")
+        if (
+            result.get("schema") != CABS_TASK_RESULT_SCHEMA
+            or result.get("execution_status") != "completed"
+            or result.get("task_id") != task_id
+            or result.get("run_manifest_sha256") != plan_sha256
+        ):
+            raise DiscoveryError(f"source task result identity is invalid: {task_id}")
+        try:
+            outputs = object_mapping(
+                result.get("outputs"), name=f"source task outputs {task_id}"
+            )
+        except TypeError as exc:
+            raise DiscoveryError(f"source task outputs are invalid: {task_id}") from exc
+        if "cabs_archive" not in outputs:
+            raise DiscoveryError(f"source task lacks its CABS archive: {task_id}")
+        archive_path: Path | None = None
+        for output_name, record in outputs.items():
+            try:
+                output_path, _ = validate_record(
+                    root=task_dir,
+                    raw=record,
+                    name=f"source task {task_id} output {output_name}",
+                )
+            except ValidationError as exc:
+                raise DiscoveryError(str(exc)) from exc
+            if output_name == "cabs_archive":
+                archive_path = output_path
+        if archive_path is None or archive_path != cabsdock_archive_path(task_dir):
+            raise DiscoveryError(f"source CABS archive identity changed: {task_id}")
+        result_paths.append(result_path)
+    return _SourceEvidence(sampling_path, tuple(result_paths))
+
+
 def _control_rows(
-    *, source_plan: dict[str, object], state_id: str, data_dir: Path
+    *, source_plan: dict[str, object], receptor_id: str, data_dir: Path
 ) -> tuple[_ControlSource, ...]:
     if (
         source_plan.get("stage") != "discovery_qualification"
-        or source_plan.get("schema") != "vela.discovery-qualification-plan/4"
+        or source_plan.get("schema") != QUALIFICATION_PLAN_SCHEMA
     ):
         raise DiscoveryError(
             "topology calibration source is not a recognized development qualification"
@@ -261,7 +383,7 @@ def _control_rows(
             not isinstance(task_id, str)
             or not isinstance(seed, int)
             or isinstance(seed, bool)
-            or row.get("receptor_id") != state_id
+            or row.get("receptor_id") != receptor_id
         ):
             raise DiscoveryError("source control task identity is invalid")
         try:
@@ -291,7 +413,7 @@ def _stratum_index(distance_A: float, bounds: tuple[float, ...]) -> int | None:
     )
 
 
-def _filtered_candidates(
+def _trajectory_candidates(
     *,
     config: AppConfig,
     source_run: Path,
@@ -302,47 +424,23 @@ def _filtered_candidates(
     state = control_bound_state(config)
     chemistry = control_chemistry(state)
     task_dir = source_run / "tasks" / task_id
-    model_path = task_dir / "output_pdbs" / "top1000.pdb"
     archive_path = cabsdock_archive_path(task_dir)
-    structure = read_structure(model_path)
-    settings = config.discovery.cabsdock
-    if len(structure) != settings.filtering_count:
-        raise DiscoveryError(f"calibration source model count is invalid: {task_id}")
+    chains = read_cabs_sequence(archive_path)
+    if chains[-1].sequence != chemistry.sequence:
+        raise DiscoveryError("topology calibration TRAF peptide is invalid")
     reference_chains = read_reference_chains(reference_path)
-    ca_distances: list[float] = []
-    sc_distances: list[float] = []
-    topology_by_replica = [0] * settings.replicas
-    per_replica = settings.filtering_count // settings.replicas
-    for model_index, model in enumerate(structure, 1):
-        _, peptide = split_model(model, peptide_sequence=chemistry.sequence)
-        ca_distance = disulfide_ca_distance(peptide=peptide, chemistry=chemistry)
-        ca_distances.append(ca_distance)
-        sc_distances.append(
-            disulfide_cabs_sc_distance(peptide=peptide, chemistry=chemistry)
-        )
-        if ca_distance <= settings.max_disulfide_ca_distance_A:
-            topology_by_replica[(model_index - 1) // per_replica] += 1
-    try:
-        audit = audit_cabs_trajectory(
-            archive_path=archive_path,
-            chemistry=chemistry,
-            replicas=settings.replicas,
-            filtering_count=settings.filtering_count,
-            max_disulfide_ca_distance_A=settings.max_disulfide_ca_distance_A,
-            filtered_topology_feasible_by_replica=tuple(topology_by_replica),
-        )
-    except DiscoveryError as exc:
-        raise DiscoveryError(f"{task_id}: {exc}") from exc
-    model_hash = sha256_file(model_path)
     archive_hash = sha256_file(archive_path)
     bounds = config.discovery.qualification.topology_calibration.strata_upper_bounds_A
     candidates: list[_Candidate] = []
-    for model_index, model in enumerate(structure, 1):
-        stratum = _stratum_index(ca_distances[model_index - 1], bounds)
+    for frame in iter_cabs_trajectory(archive_path=archive_path, chains=chains):
+        ca_distance = trajectory_disulfide_ca_distance(frame, chemistry=chemistry)
+        stratum = _stratum_index(ca_distance, bounds)
         if stratum is None:
             continue
-        receptor, peptide = split_model(model, peptide_sequence=chemistry.sequence)
-        contacts = ca_contact_residues(
+        receptor = frame.chain_ca[0]
+        peptide = frame.chain_ca[-1]
+        contacts = trajectory_ca_contact_residues(
+            sequence=chains[0],
             receptor=receptor,
             peptide=peptide,
             threshold_A=(
@@ -351,13 +449,13 @@ def _filtered_candidates(
         )
         if not contacts:
             continue
-        alignment = align_receptor(
-            receptor=receptor,
+        alignment = align_trajectory_receptor(
+            sequence=chains[0],
+            positions=receptor,
             reference_chains=reference_chains,
         )
         peptide_positions = tuple(
-            alignment.transform.apply(required_atom(residue, "CA").pos)
-            for residue in peptide
+            alignment.transform.apply(gemmi.Position(*position)) for position in peptide
         )
         local_position = centroid(
             tuple(
@@ -368,14 +466,11 @@ def _filtered_candidates(
             _Candidate(
                 task_id=task_id,
                 seed=seed,
-                model_path=model_path,
-                model_sha256=model_hash,
-                model_index=model_index,
+                frame_identity=CabsFrameIdentity(frame.replica, frame.model),
                 archive_path=archive_path,
                 archive_sha256=archive_hash,
-                ca_distance_A=ca_distances[model_index - 1],
-                cabs_sc_distance_A=sc_distances[model_index - 1],
-                interaction_energy=audit.filtered_interaction_energies[model_index - 1],
+                ca_distance_A=ca_distance,
+                interaction_energy=frame.interaction_energy,
                 contact_residues=contacts,
                 local_position=local_position,
                 stratum_index=stratum,
@@ -420,7 +515,7 @@ def _select_stratum(
     if len(candidates) < budget:
         raise DiscoveryError("topology calibration stratum lacks enough models")
     energy_ranks = _percentile_ranks(candidates, attribute="interaction_energy")
-    sc_ranks = _percentile_ranks(candidates, attribute="cabs_sc_distance_A")
+    ca_ranks = _percentile_ranks(candidates, attribute="ca_distance_A")
     selected: list[_Candidate] = []
     remaining = set(candidates)
     while len(selected) < budget:
@@ -440,11 +535,11 @@ def _select_stratum(
                     math.dist(
                         (
                             energy_ranks[candidate.identity],
-                            sc_ranks[candidate.identity],
+                            ca_ranks[candidate.identity],
                         ),
                         (
                             energy_ranks[existing.identity],
-                            sc_ranks[existing.identity],
+                            ca_ranks[existing.identity],
                         ),
                     )
                     for existing in selected
@@ -480,6 +575,55 @@ def _select_stratum(
     )
 
 
+def _materialize_calibration_sources(
+    *,
+    selected: tuple[tuple[_Candidate, int], ...],
+    run_dir: Path,
+    config: AppConfig,
+) -> dict[str, tuple[Path, str, int, float]]:
+    """按源任务批量物化少量校准帧, 并核对物化后的粗粒化几何。"""
+    chemistry = control_chemistry(control_bound_state(config))
+    by_task: dict[str, list[_Candidate]] = {}
+    for candidate, _ in selected:
+        by_task.setdefault(candidate.task_id, []).append(candidate)
+    result: dict[str, tuple[Path, str, int, float]] = {}
+    for task_id, candidates in sorted(by_task.items()):
+        identities = tuple(candidate.frame_identity for candidate in candidates)
+        task_dir = run_dir / "source_frames" / task_id
+        _, model_path = materialize_cabs_frames(
+            archive_path=candidates[0].archive_path,
+            identities=identities,
+            task_dir=task_dir,
+            settings=config.discovery.cabsdock,
+        )
+        structure = read_structure(model_path)
+        if len(structure) != len(candidates):
+            raise DiscoveryError("materialized topology calibration count is invalid")
+        model_sha256 = sha256_file(model_path)
+        for model_index, (candidate, model) in enumerate(
+            zip(candidates, structure, strict=True), 1
+        ):
+            _, peptide = split_model(model, peptide_sequence=chemistry.sequence)
+            materialized_ca_distance = disulfide_ca_distance(
+                peptide=peptide, chemistry=chemistry
+            )
+            if abs(materialized_ca_distance - candidate.ca_distance_A) > 0.002:
+                raise DiscoveryError(
+                    "materialized CABS frame differs from its TRAF CA geometry"
+                )
+            result[candidate.identity] = (
+                model_path,
+                model_sha256,
+                model_index,
+                disulfide_cabs_sc_distance(peptide=peptide, chemistry=chemistry),
+            )
+    if set(result) != {candidate.identity for candidate, _ in selected}:
+        raise DiscoveryError(
+            "topology calibration source materialization is incomplete"
+        )
+    return result
+
+
 def write_topology_calibration_plan(
     *, config: AppConfig, source_run: Path, run_id: str
 ) -> TopologyCalibrationPlan:
@@ -488,13 +632,28 @@ def write_topology_calibration_plan(
     source = _source_run(config=config, source_run=source_run)
     source_plan_path = source / "qualification_plan.json"
     source_plan = _document(source_plan_path, name="source qualification plan")
+    source_evidence = validate_topology_source_evidence(
+        source_run=source, source_plan=source_plan
+    )
     source_schema = source_plan.get("schema")
     if not isinstance(source_schema, str):
         raise DiscoveryError("source qualification plan schema is invalid")
     state = control_bound_state(config)
+    try:
+        control_scope = object_mapping(
+            source_plan.get("control_scope"), name="source control scope"
+        )
+    except TypeError as exc:
+        raise DiscoveryError("source qualification control scope is invalid") from exc
+    if (
+        control_scope.get("native_bound_state_id") != state.state_id
+        or control_scope.get("control_receptor_id")
+        != config.discovery.qualification.control_receptor_id
+    ):
+        raise DiscoveryError("source qualification uses a different control system")
     controls = _control_rows(
         source_plan=source_plan,
-        state_id=state.state_id,
+        receptor_id=config.discovery.qualification.control_receptor_id,
         data_dir=config.paths.data_dir,
     )
     calibration = config.discovery.qualification.topology_calibration
@@ -505,7 +664,7 @@ def write_topology_calibration_plan(
     candidates = tuple(
         candidate
         for control in controls
-        for candidate in _filtered_candidates(
+        for candidate in _trajectory_candidates(
             config=config,
             source_run=source,
             task_id=control.task_id,
@@ -526,14 +685,21 @@ def write_topology_calibration_plan(
         raise DiscoveryError(
             f"topology calibration run directory already exists: {run_dir}"
         )
+    verify_cabsdock_tool(config.discovery.cabsdock)
     snapshot_path = run_dir / "config.snapshot.txt"
     atomic_write_text(snapshot_path, config.source_snapshot_text)
+    materialized = _materialize_calibration_sources(
+        selected=tuple(selected), run_dir=run_dir, config=config
+    )
     cg2all = verify_cg2all_tool(config.validation.cg2all)
     flexpepdock = verify_flexpepdock_tool(config.validation.rosetta)
     rosetta_scripts = verify_rosetta_scripts_tool(config.validation.rosetta)
     bounds = calibration.strata_upper_bounds_A
     task_rows: list[dict[str, JsonValue]] = []
     for ordinal, (candidate, site_group) in enumerate(selected):
+        model_path, model_sha256, model_index, cabs_sc_distance = materialized[
+            candidate.identity
+        ]
         lower = bounds[candidate.stratum_index - 1] if candidate.stratum_index else None
         upper = bounds[candidate.stratum_index]
         task_rows.append(
@@ -542,9 +708,13 @@ def write_topology_calibration_plan(
                 "source_task_id": candidate.task_id,
                 "source_seed": candidate.seed,
                 "source_model": {
-                    "path": candidate.model_path.relative_to(source).as_posix(),
-                    "sha256": candidate.model_sha256,
-                    "model_index": candidate.model_index,
+                    "path": model_path.relative_to(run_dir).as_posix(),
+                    "sha256": model_sha256,
+                    "model_index": model_index,
+                    "frame": {
+                        "replica": candidate.frame_identity.replica,
+                        "model": candidate.frame_identity.model,
+                    },
                 },
                 "source_archive": {
                     "path": candidate.archive_path.relative_to(source).as_posix(),
@@ -563,9 +733,7 @@ def write_topology_calibration_plan(
                 },
                 "selection_features": {
                     "disulfide_ca_distance_A": round(candidate.ca_distance_A, 6),
-                    "disulfide_cabs_sc_distance_A": round(
-                        candidate.cabs_sc_distance_A, 6
-                    ),
+                    "disulfide_cabs_sc_distance_A": round(cabs_sc_distance, 6),
                     "cabsdock_interaction_energy": candidate.interaction_energy,
                     "site_group": site_group,
                     "contact_residues": sorted(candidate.contact_residues),
@@ -583,6 +751,12 @@ def write_topology_calibration_plan(
             "sha256": sha256_file(source_plan_path),
             "schema": source_schema,
         },
+        "qualification_sampling": file_record(
+            source_evidence.sampling_path, root=source
+        ),
+        "task_results": [
+            file_record(path, root=source) for path in source_evidence.task_result_paths
+        ],
         "control_bound_state_id": state.state_id,
         "development_seeds": [control.seed for control in controls],
         "receptor_only_reference": {
@@ -693,7 +867,6 @@ def _run_task(
     *,
     config: AppConfig,
     run_dir: Path,
-    source_run: Path,
     reference_receptor_path: Path,
     raw_task: object,
     plan_sha256: str,
@@ -726,7 +899,7 @@ def _run_task(
         )
     task_dir.mkdir(parents=True)
     source_path, _ = validate_record(
-        root=source_run, raw=source_model, name="topology calibration source model"
+        root=run_dir, raw=source_model, name="topology calibration source model"
     )
     state = control_bound_state(config)
     chemistry = control_chemistry(state)
@@ -892,6 +1065,23 @@ def _run_task(
     prepacked_path = task_dir / "all_atom_prepacked.pdb"
     atomic_write_text(prepacked_path, rosetta_output.read_text(encoding="utf-8"))
     artifacts["all_atom_prepacked"] = file_record(prepacked_path, root=task_dir)
+    site_constraint_path = task_dir / "site_coordinate_constraints.cst"
+    constraint_count = write_peptide_site_coordinate_constraints(
+        source_path=prepacked_path,
+        destination=site_constraint_path,
+        chemistry=chemistry,
+        flat_width_A=(
+            config.discovery.qualification.topology_calibration.site_coordinate_constraint_flat_width_A
+        ),
+        standard_deviation_A=(
+            config.discovery.qualification.topology_calibration.site_coordinate_constraint_sd_A
+        ),
+    )
+    if constraint_count != len(chemistry.sequence):
+        raise DiscoveryError("topology refine site constraint count is invalid")
+    artifacts["site_coordinate_constraints"] = file_record(
+        site_constraint_path, root=task_dir
+    )
     refine_dir = task_dir / "topology_refine"
     refine_dir.mkdir()
     refine_command = build_topology_refine_command(
@@ -900,6 +1090,10 @@ def _run_task(
         disulfide_path=disulfide_path,
         output_dir=refine_dir,
         seed=rosetta_seed,
+        site_constraint_path=site_constraint_path,
+        site_constraint_weight=(
+            config.discovery.qualification.topology_calibration.site_coordinate_constraint_weight
+        ),
         fixed_histidine_pose_indices=cg_input.fixed_histidine_pose_indices,
     )
     commands["topology_refine"] = list(refine_command)
@@ -939,6 +1133,9 @@ def _run_task(
             min_interchain_heavy_atom_distance_A=(
                 config.discovery.qualification.topology_calibration.min_interchain_heavy_atom_distance_A
             ),
+            min_nonlocal_peptide_heavy_atom_distance_A=(
+                config.discovery.qualification.topology_calibration.min_nonlocal_peptide_heavy_atom_distance_A
+            ),
             contact_ca_threshold_A=(
                 config.discovery.qualification.topology_calibration.contact_ca_threshold_A
             ),
@@ -965,23 +1162,11 @@ def _run_task(
             commands=commands,
             artifacts=artifacts,
         )
-    residue_count = cg_input.receptor_residue_count + cg_input.peptide_residue_count
     refine_fa_rep = refine_scores[0].score("fa_rep")
     refine_backbone_strain = max(refine_scores[0].score("omega"), 0.0) + max(
         refine_scores[0].score("rama_prepro"), 0.0
     )
-    refine_fa_rep_per_residue = refine_fa_rep / residue_count
-    refine_backbone_strain_per_residue = refine_backbone_strain / residue_count
-    calibration = config.discovery.qualification.topology_calibration
-    score_failures: list[str] = []
-    if refine_fa_rep_per_residue > calibration.max_refine_fa_rep_per_residue:
-        score_failures.append("refined_fa_rep_exceeds_normalized_limit")
-    if (
-        refine_backbone_strain_per_residue
-        > calibration.max_refine_backbone_strain_per_residue
-    ):
-        score_failures.append("refined_backbone_strain_exceeds_normalized_limit")
-    failures = tuple((*assessment.failures, *score_failures))
+    failures = assessment.failures
     metrics: dict[str, JsonValue] = {
         "receptor_ca_rmsd_A": round(assessment.receptor_ca_rmsd_A, 6),
         "peptide_pose_ca_rmsd_A": round(assessment.peptide_pose_ca_rmsd_A, 6),
@@ -998,6 +1183,9 @@ def _run_task(
         "min_interchain_heavy_atom_distance_A": round(
             assessment.min_interchain_heavy_atom_distance_A, 6
         ),
+        "min_nonlocal_peptide_heavy_atom_distance_A": round(
+            assessment.min_nonlocal_peptide_heavy_atom_distance_A, 6
+        ),
         "rosetta_scores": {
             "rebuild_total_score": rebuild_scores[0].score("total_score"),
             "rebuild_dslf_fa13": rebuild_scores[0].score("dslf_fa13"),
@@ -1009,10 +1197,7 @@ def _run_task(
             "refine_fa_rep": refine_fa_rep,
             "refine_omega": refine_scores[0].score("omega"),
             "refine_rama_prepro": refine_scores[0].score("rama_prepro"),
-            "refine_fa_rep_per_residue": round(refine_fa_rep_per_residue, 6),
-            "refine_backbone_strain_per_residue": round(
-                refine_backbone_strain_per_residue, 6
-            ),
+            "refine_positive_backbone_strain": refine_backbone_strain,
         },
     }
     return _write_task_result(
@@ -1031,7 +1216,7 @@ def _run_task(
 
 def _verify_plan(
     *, config: AppConfig, run_dir: Path
-) -> tuple[dict[str, object], Path, Path, tuple[object, ...]]:
+) -> tuple[dict[str, object], Path, tuple[object, ...]]:
     plan_path = run_dir / PLAN_NAME
     plan = _document(plan_path, name="topology calibration plan")
     if (
@@ -1077,14 +1262,12 @@ def _verify_plan(
         raise DiscoveryError(str(exc)) from exc
     if plan.get("task_count") != len(tasks):
         raise DiscoveryError("topology calibration task count is invalid")
-    return plan, source_run, reference_receptor_path, tasks
+    return plan, reference_receptor_path, tasks
 
 
 def run_topology_calibration(*, config: AppConfig, run_dir: Path) -> Path:
     """执行或恢复冻结的全原子拓扑校准任务。"""
-    plan, source_run, reference_receptor_path, tasks = _verify_plan(
-        config=config, run_dir=run_dir
-    )
+    plan, reference_receptor_path, tasks = _verify_plan(config=config, run_dir=run_dir)
     manifest_path = run_dir / MANIFEST_NAME
     if manifest_path.exists():
         raise DiscoveryError(
@@ -1128,7 +1311,6 @@ def run_topology_calibration(*, config: AppConfig, run_dir: Path) -> Path:
                 _run_task,
                 config=config,
                 run_dir=run_dir,
-                source_run=source_run,
                 reference_receptor_path=reference_receptor_path,
                 raw_task=task,
                 plan_sha256=plan_sha256,
@@ -1159,7 +1341,7 @@ def run_topology_calibration(*, config: AppConfig, run_dir: Path) -> Path:
 
 def analyze_topology_calibration(*, config: AppConfig, run_dir: Path) -> Path:
     """按预注册分层规则汇总全原子可恢复性并写出资格证据。"""
-    plan, _, _, tasks = _verify_plan(config=config, run_dir=run_dir)
+    plan, _, tasks = _verify_plan(config=config, run_dir=run_dir)
     manifest_path = run_dir / MANIFEST_NAME
     manifest = _document(manifest_path, name="topology calibration manifest")
     if (
@@ -1305,15 +1487,16 @@ def analyze_topology_calibration(*, config: AppConfig, run_dir: Path) -> Path:
         "tools": json_value(plan.get("tools"), name="calibration tools"),
         "strata": strata,
         "threshold_candidates": threshold_candidates,
-        "calibrated_max_disulfide_ca_distance_A": calibrated_threshold,
+        "calibrated_max_reconstructable_disulfide_ca_distance_A": (
+            calibrated_threshold
+        ),
         "all_atom_disulfide_rebuild_success_definition": [
             "cg2all_command_completed",
             "RosettaScripts_ForceDisulfides_repack_completed",
             "FlexPepDock_prepack_completed",
             "single_native_free_FlexPepDock_local_refine_completed",
-            "Rosetta_scores_are_finite_and_include_dslf_fa13",
-            "refined_weighted_fa_rep_per_residue_within_contract",
-            "refined_weighted_backbone_strain_per_residue_within_contract",
+            "peptide_CA_site_coordinate_constraints_applied",
+            "required_Rosetta_scores_are_finite_and_include_dslf_fa13",
             "receptor_CA_pose_RMSD_within_contract",
             "peptide_internal_CA_RMSD_within_contract",
             "ligand_centroid_displacement_within_contract",
@@ -1321,6 +1504,7 @@ def analyze_topology_calibration(*, config: AppConfig, run_dir: Path) -> Path:
             "all_atom_backbones_complete",
             "all_disulfide_SG_distances_within_contract",
             "no_interchain_heavy_atom_distance_below_contract",
+            "no_nonlocal_peptide_heavy_atom_distance_below_contract",
         ],
         "limitations": [
             "calibrates standard-amino-acid disulfide topology only",

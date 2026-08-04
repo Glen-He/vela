@@ -103,7 +103,7 @@ def _verify_plan(
 ) -> tuple[dict[str, object], tuple[CandidateHandoffTask, ...]]:
     plan = read_document(run_dir / HANDOFF_PLAN_NAME, name="handoff plan")
     if (
-        plan.get("schema") != "vela.validation-handoff-plan/2"
+        plan.get("schema") != "vela.validation-handoff-plan/3"
         or plan.get("stage") != "validation_candidate_handoff"
         or plan.get("status") != "planned"
         or not is_current_vela_software(plan.get("software"))
@@ -333,7 +333,7 @@ def run_handoff(*, config: AppConfig, run_dir: Path) -> HandoffOutcome:
     atomic_write_json(
         manifest_path,
         {
-            "schema": "vela.validation-handoff-manifest/2",
+            "schema": "vela.validation-handoff-manifest/3",
             "stage": "validation_candidate_handoff",
             "status": "completed",
             "completed_at": utc_now(),

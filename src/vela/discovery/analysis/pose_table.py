@@ -124,11 +124,20 @@ def _float(value: str, *, field: str, pose_id: str) -> float:
 def read_pose_evidence(*, path: Path, run_dir: Path) -> tuple[PoseEvidence, ...]:
     """读取、收窄并复核所有规范粗粒化候选记录。"""
     poses: list[PoseEvidence] = []
+    verified_hashes: dict[Path, str] = {}
     for row in _rows(path):
         pose_id = row["pose_id"]
         model_path = _model_path(raw=row["model_path"], run_dir=run_dir)
         expected_hash = row["model_sha256"]
-        if sha256_file(model_path) != expected_hash:
+        recorded_hash = verified_hashes.get(model_path)
+        if recorded_hash is not None and recorded_hash != expected_hash:
+            raise DiscoveryError(
+                f"pose table declares conflicting hashes for one model: {model_path}"
+            )
+        if recorded_hash is None:
+            recorded_hash = sha256_file(model_path)
+            verified_hashes[model_path] = recorded_hash
+        if recorded_hash != expected_hash:
             raise DiscoveryError(f"pose model hash mismatch: {model_path}")
         poses.append(
             PoseEvidence(

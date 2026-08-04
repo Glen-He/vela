@@ -11,11 +11,17 @@ from vela.discovery.models import CabsDockSettings, DiscoveryError, DiscoveryTas
 from vela.preparation.chemistry import ChemistryDefinition
 
 CRITICAL_CABS_SOURCES = (
+    "CABS/analysis/restraints.py",
+    "CABS/core/cabs.py",
+    "CABS/core/job.py",
     "CABS/core/trajectory.py",
+    "CABS/data/data0.dat",
+    "CABS/io/config.json",
     "CABS/structures/atom.py",
     "CABS/utils/filter.py",
     "CABS/utils/utils.py",
 )
+CABS_TASK_RESULT_SCHEMA = "vela.cabsdock-task-result/5"
 
 
 def cabsdock_source_records(
@@ -59,15 +65,13 @@ def verify_cabsdock_tool(settings: CabsDockSettings) -> str:
         text=True,
     )
     help_text = help_result.stdout + help_result.stderr
-    if help_result.returncode != 0 or "--disulfide-bonds" not in help_text:
+    if help_result.returncode != 0 or "--ca-rest-add" not in help_text:
         raise DiscoveryError(
-            "CABS-dock does not expose the required native --disulfide-bonds option"
+            "CABS-dock does not expose the required --ca-rest-add option"
         )
     if not settings.source_dir.is_dir():
         raise DiscoveryError(f"CABS source directory is missing: {settings.source_dir}")
     cabsdock_source_records(settings)
-    if not settings.patch_file.is_file():
-        raise DiscoveryError(f"CABS patch file is missing: {settings.patch_file}")
     python_executable = executable.parent / "python"
     if not python_executable.is_file():
         raise DiscoveryError(f"CABS Python executable is missing: {python_executable}")
@@ -106,25 +110,26 @@ def verify_cabsdock_tool(settings: CabsDockSettings) -> str:
             "CABS source revision mismatch: "
             f"expected {settings.source_revision}, got {revision or 'unavailable'}"
         )
-    patch_result = subprocess.run(
+    diff_result = subprocess.run(
         [
             "git",
             "-C",
             str(settings.source_dir),
-            "apply",
-            "--reverse",
-            "--check",
-            str(settings.patch_file),
+            "diff",
+            "--quiet",
+            "HEAD",
+            "--",
+            *CRITICAL_CABS_SOURCES,
         ],
         check=False,
-        capture_output=True,
-        text=True,
     )
-    if patch_result.returncode != 0:
+    if diff_result.returncode == 1:
         raise DiscoveryError(
-            "required CABS-dock disulfide CLI patch is not applied: "
-            + patch_result.stderr.strip()
+            "critical CABS source files contain uncommitted changes; restore or commit "
+            "the declared source revision before running Stage 2"
         )
+    if diff_result.returncode != 0:
+        raise DiscoveryError("CABS critical-source worktree check failed")
     return version_text
 
 
@@ -149,7 +154,15 @@ def build_cabsdock_command(
         f"{chemistry.sequence}:{secondary_structure}",
     ]
     for bond in chemistry.disulfide_bonds:
-        command.extend(["-F", f"{bond.first}:PEP1", f"{bond.second}:PEP1"])
+        command.extend(
+            [
+                "--ca-rest-add",
+                f"{bond.first}:PEP1",
+                f"{bond.second}:PEP1",
+                str(settings.disulfide_ca_restraint_distance_A),
+                str(settings.disulfide_ca_restraint_weight),
+            ]
+        )
     command.extend(
         [
             "-g",
@@ -198,21 +211,34 @@ def build_cabsdock_command(
     return tuple(command)
 
 
-def verify_native_disulfide(*, task_dir: Path, chemistry: ChemistryDefinition) -> None:
+def verify_disulfide_ca_restraint(
+    *,
+    task_dir: Path,
+    chemistry: ChemistryDefinition,
+    settings: CabsDockSettings,
+) -> None:
+    """确认任务实际使用了项目声明的 C-alpha 环拓扑约束。"""
     config_text = (task_dir / "config.ini").read_text(encoding="utf-8")
     restraints_text = (task_dir / "output_data" / "restraints.txt").read_text(
         encoding="utf-8"
     )
     for bond in chemistry.disulfide_bonds:
         endpoints = f"{bond.first}:PEP1 {bond.second}:PEP1"
-        if endpoints not in config_text:
+        configured = (
+            f"{endpoints} {settings.disulfide_ca_restraint_distance_A} "
+            f"{settings.disulfide_ca_restraint_weight}"
+        )
+        if configured not in config_text:
             raise DiscoveryError(
-                f"CABS-dock did not record native disulfide endpoints: {endpoints}"
+                f"CABS-dock did not record the disulfide CA restraint: {endpoints}"
             )
-        restraint = f"{endpoints} 2.0000 0.0000 1.00 SG"
+        restraint = (
+            f"{endpoints} {settings.disulfide_ca_restraint_distance_A:.4f} "
+            f"1.0000 {settings.disulfide_ca_restraint_weight:.2f}"
+        )
         if restraint not in restraints_text:
             raise DiscoveryError(
-                f"CABS-dock did not generate the SG restraint: {endpoints}"
+                f"CABS-dock did not generate the disulfide CA restraint: {endpoints}"
             )
 
 

@@ -24,7 +24,10 @@ from vela.discovery.models import (
     SiteAnalysisSettings,
     TopologyCalibrationSettings,
 )
-from vela.discovery.qualification.topology import topology_calibration_contract
+from vela.discovery.qualification.topology import (
+    topology_calibration_contract,
+    validate_topology_source_evidence,
+)
 from vela.discovery.readiness import assess_discovery_readiness
 from vela.discovery.sampling.cabsdock import build_cabsdock_command
 from vela.discovery.sampling.evidence import (
@@ -70,19 +73,80 @@ def test_topology_calibration_contract_is_native_free_and_all_atom() -> None:
         contract["topology_feasibility"], name="topology feasibility"
     )
     assert sampling["native_information_used"] is False
-    assert sampling["ca_strata_upper_bounds_A"] == [6.0, 7.0, 8.0, 10.0]
-    assert feasibility["candidate_thresholds_A"] == [6.0, 7.0, 8.0]
+    assert sampling["ca_strata_upper_bounds_A"] == [6.0, 7.0, 8.0, 10.0, 12.0]
+    assert feasibility["candidate_thresholds_A"] == [6.0, 7.0, 8.0, 10.0]
     assert feasibility["threshold_selection"] == (
         "highest_contiguous_passing_candidate"
     )
-    assert feasibility["above_threshold_comparator_upper_bound_A"] == 10.0
+    assert feasibility["above_threshold_comparator_upper_bound_A"] == 12.0
     assert feasibility["chemical_bond_claimed"] is False
     assert reconstruction["pipeline"] == (
         "cg2all_peptide_then_aligned_experimental_receptor_graft_then_"
         "RosettaScripts_ForceDisulfides_repack_then_FlexPepDock_prepack_"
-        "then_single_local_refine"
+        "then_site_coordinate_constrained_single_local_refine"
     )
+    constraints = object_mapping(
+        reconstruction["site_coordinate_constraints"], name="site constraints"
+    )
+    assert constraints == {
+        "atoms": "all_peptide_CA",
+        "reference_frame": "fixed_receptor_first_CA",
+        "function": "FLAT_HARMONIC",
+        "flat_width_A": 2.0,
+        "standard_deviation_A": 1.0,
+        "score_weight": 1.0,
+    }
     assert reconstruction["terminal_chemistry_assessed"] is False
+
+
+def test_topology_source_validation_rejects_changed_cabs_archive(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "qualification"
+    task_id = "control__seed_1"
+    plan_path = source / "qualification_plan.json"
+    plan: dict[str, JsonValue] = {
+        "schema": "vela.discovery-qualification-plan/6",
+        "stage": "discovery_qualification",
+        "target_id": "test_target",
+        "tasks": [{"task_id": task_id}],
+    }
+    atomic_write_json(plan_path, plan)
+    atomic_write_json(
+        source / "qualification_sampling.json",
+        {
+            "schema": "vela.discovery-qualification-sampling/6",
+            "stage": "discovery_qualification",
+            "status": "sampling_completed",
+            "target_id": "test_target",
+            "qualification_plan_sha256": sha256_file(plan_path),
+            "tasks": [{"task_id": task_id, "execution_status": "completed"}],
+        },
+    )
+    task_dir = source / "tasks" / task_id
+    archive = task_dir / "result.cbs"
+    atomic_write_text(archive, "original archive\n")
+    atomic_write_json(
+        task_dir / "task_result.json",
+        {
+            "schema": "vela.cabsdock-task-result/5",
+            "execution_status": "completed",
+            "task_id": task_id,
+            "run_manifest_sha256": sha256_file(plan_path),
+            "outputs": {
+                "cabs_archive": {
+                    "path": archive.name,
+                    "sha256": sha256_file(archive),
+                }
+            },
+        },
+    )
+    validate_topology_source_evidence(source_run=source, source_plan=plan)
+
+    atomic_write_text(archive, "changed archive\n")
+
+    with pytest.raises(DiscoveryError, match="hash mismatch"):
+        validate_topology_source_evidence(source_run=source, source_plan=plan)
 
 
 def test_candidate_selection_contract_is_complete_and_has_no_native_input() -> None:
@@ -275,7 +339,7 @@ def _ready_config(tmp_path: Path) -> AppConfig:
         atomic_write_json(
             report_path,
             {
-                "schema": "vela.discovery-qualification-report/4",
+                "schema": "vela.discovery-qualification-report/7",
                 "status": "qualified",
                 "target_id": target_id,
                 "recommended_target_config": {
@@ -296,15 +360,18 @@ def _ready_config(tmp_path: Path) -> AppConfig:
     source_dir = tmp_path / "cabs-source"
     source_dir.mkdir()
     for relative in (
+        "CABS/analysis/restraints.py",
+        "CABS/core/cabs.py",
+        "CABS/core/job.py",
         "CABS/core/trajectory.py",
+        "CABS/data/data0.dat",
+        "CABS/io/config.json",
         "CABS/structures/atom.py",
         "CABS/utils/filter.py",
         "CABS/utils/utils.py",
     ):
         source = source_dir / relative
         atomic_write_text(source, f"# fixture {relative}\n")
-    patch_file = tmp_path / "cabs.patch"
-    atomic_write_text(patch_file, "test patch\n")
     topology_report = tmp_path / "qualification" / "topology.json"
     atomic_write_json(
         topology_report,
@@ -322,7 +389,6 @@ def _ready_config(tmp_path: Path) -> AppConfig:
             executable=executable,
             source_dir=source_dir,
             source_revision="1" * 40,
-            patch_file=patch_file,
             seed_workers=2,
             peptide_secondary_structure="CCCCCCCCCCC",
             mc_annealing=20,
@@ -340,20 +406,28 @@ def _ready_config(tmp_path: Path) -> AppConfig:
             clustering_medoids=10,
             clustering_iterations=100,
             trajectory_contact_ca_threshold_A=10.0,
-            max_disulfide_ca_distance_A=8.0,
+            disulfide_ca_restraint_distance_A=5.5,
+            disulfide_ca_restraint_weight=1.0,
+            max_reconstructable_disulfide_ca_distance_A=8.0,
             min_models_for_selection=10,
             selection_contact_jaccard_distance=0.8,
             selection_position_distance_A=12.0,
             pose_clustering_rmsd_A=4.0,
+            max_sites_per_task=64,
+            max_pose_clusters_per_site=4,
         ),
         qualification=DiscoveryQualificationSettings(
             seeds=(31, 32),
             control_bound_state_id="4IB5_A_D",
+            control_receptor_id="3Q04_A",
             control_target_id="ck2_alpha",
             control_secondary_structure="CCCCCCCCCCCCC",
             max_native_ligand_rmsd_A=4.0,
+            max_native_site_centroid_distance_A=4.0,
             min_native_receptor_contact_fraction=0.2,
-            min_successful_control_seeds=1,
+            min_native_sampling_seed_support=1,
+            min_native_site_seed_support=1,
+            min_selection_native_seed_recall_fraction=1.0,
             topology_calibration_status="qualified",
             topology_calibration_report=topology_report,
             topology_calibration_report_sha256=sha256_file(topology_report),
@@ -364,12 +438,14 @@ def _ready_config(tmp_path: Path) -> AppConfig:
                 min_success_fraction_per_stratum=0.75,
                 min_successful_seeds_per_stratum=6,
                 min_interchain_heavy_atom_distance_A=1.2,
+                min_nonlocal_peptide_heavy_atom_distance_A=1.2,
                 max_peptide_internal_ca_rmsd_A=4.0,
                 max_ligand_centroid_displacement_A=4.0,
                 contact_ca_threshold_A=10.0,
                 min_receptor_contact_retention_fraction=0.5,
-                max_refine_fa_rep_per_residue=2.0,
-                max_refine_backbone_strain_per_residue=1.0,
+                site_coordinate_constraint_flat_width_A=2.0,
+                site_coordinate_constraint_sd_A=1.0,
+                site_coordinate_constraint_weight=1.0,
             ),
         ),
         targets=(
@@ -472,8 +548,9 @@ def test_ready_target_expands_its_receptors_by_independent_seed(
         document.get("method_parameters"), name="method_parameters"
     )
     cabsdock = object_mapping(method_parameters.get("cabsdock"), name="cabsdock")
-    patch = object_mapping(cabsdock.get("patch"), name="patch")
-    assert patch["sha256"] == sha256_file(config.discovery.cabsdock.patch_file)
+    assert cabsdock["executable_sha256"] == sha256_file(
+        config.discovery.cabsdock.executable
+    )
 
 
 def test_stage_one_readiness_is_independent_of_discovery_method(
@@ -542,7 +619,7 @@ def test_discovery_plan_never_overwrites_existing_run(tmp_path: Path) -> None:
         )
 
 
-def test_cabsdock_command_uses_native_ring_and_no_known_site_restraint(
+def test_cabsdock_command_uses_ca_ring_restraint_and_no_known_site_restraint(
     tmp_path: Path,
 ) -> None:
     config = _ready_config(tmp_path)
@@ -558,13 +635,16 @@ def test_cabsdock_command_uses_native_ring_and_no_known_site_restraint(
 
     assert command[0] == str(config.discovery.cabsdock.executable)
     assert command[command.index("-p") + 1] == "CWMSPRHLGTC:CCCCCCCCCCC"
-    assert command[command.index("-F") + 1 : command.index("-F") + 3] == (
+    index = command.index("--ca-rest-add")
+    assert command[index + 1 : index + 5] == (
         "1:PEP1",
         "11:PEP1",
+        "5.5",
+        "1.0",
     )
     assert command[command.index("-A") + 1] == "N"
     assert "--exclude" not in command
-    assert "--ca-rest-add" not in command
+    assert "-F" not in command
     assert "--sc-rest-add" not in command
 
 

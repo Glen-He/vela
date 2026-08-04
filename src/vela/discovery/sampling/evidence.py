@@ -46,12 +46,16 @@ class CandidateSelectionSettings:
     contact_jaccard_distance: float
     position_distance_A: float
     peptide_ca_rmsd_A: float
+    max_sites: int
+    max_pose_clusters_per_site: int
 
     def __post_init__(self) -> None:
         if not 0.0 < self.contact_jaccard_distance <= 1.0:
             raise DiscoveryError("selection contact Jaccard distance must be in (0, 1]")
         if self.position_distance_A <= 0 or self.peptide_ca_rmsd_A <= 0:
             raise DiscoveryError("selection distance thresholds must be positive")
+        if self.max_sites < 1 or self.max_pose_clusters_per_site < 1:
+            raise DiscoveryError("selection cluster budgets must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +112,8 @@ def candidate_selection_settings(
         contact_jaccard_distance=settings.selection_contact_jaccard_distance,
         position_distance_A=settings.selection_position_distance_A,
         peptide_ca_rmsd_A=settings.pose_clustering_rmsd_A,
+        max_sites=settings.max_sites_per_task,
+        max_pose_clusters_per_site=settings.max_pose_clusters_per_site,
     )
 
 
@@ -122,7 +128,9 @@ def candidate_selection_contract(
         "minimum_input_models": settings.min_models_for_selection,
         "topology_feasibility": {
             "representation": "peptide_disulfide_endpoint_ca",
-            "maximum_distance_A": settings.max_disulfide_ca_distance_A,
+            "maximum_distance_A": (
+                settings.max_reconstructable_disulfide_ca_distance_A
+            ),
             "chemical_bond_claimed": False,
         },
         "receptor_contact": {
@@ -140,13 +148,16 @@ def candidate_selection_contract(
             "distance": "max_normalized_contact_jaccard_and_centroid_distance",
             "contact_jaccard_distance": settings.selection_contact_jaccard_distance,
             "position_distance_A": settings.selection_position_distance_A,
-            "maximum_site_count": None,
+            "maximum_site_count": settings.max_sites_per_task,
+            "ranking": "population_desc_then_best_interaction_energy",
         },
         "pose_clustering": {
             "algorithm": "deterministic_bounded_leader_complete_diameter",
             "atom_set": "peptide_CA_after_receptor_alignment",
             "rmsd_A": settings.pose_clustering_rmsd_A,
             "cluster_coverage": "complete",
+            "maximum_clusters_per_site": settings.max_pose_clusters_per_site,
+            "ranking": "population_desc_then_best_interaction_energy",
         },
         "representatives": {
             "per_pose_cluster": [
@@ -154,7 +165,9 @@ def candidate_selection_contract(
                 "minimum_cabsdock_interaction_energy",
             ],
             "maximum_per_pose_cluster": 2,
-            "total_candidate_budget": None,
+            "total_candidate_budget_per_task": (
+                settings.max_sites_per_task * settings.max_pose_clusters_per_site * 2
+            ),
             "tie_break": "lexicographic_pose_id",
         },
     }
@@ -414,10 +427,18 @@ def _select_candidates(
         identity=lambda item: item.pose_id,
         maximum_distance=1.0,
     )
+    ranked_sites = sorted(
+        site_clusters,
+        key=lambda cluster: (
+            -len(cluster),
+            min(item.ranking_score for item in cluster),
+            min(item.pose_id for item in cluster),
+        ),
+    )
     selected: dict[str, _FrameEvidence] = {}
     pose_cluster_count = 0
     selected_pose_cluster_count = 0
-    for site_cluster in site_clusters:
+    for site_cluster in ranked_sites[: settings.max_sites]:
         pose_clusters = bounded_leader_clusters(
             site_cluster,
             distance=_peptide_rmsd,
@@ -425,8 +446,17 @@ def _select_candidates(
             maximum_distance=settings.peptide_ca_rmsd_A,
         )
         pose_cluster_count += len(pose_clusters)
-        selected_pose_cluster_count += len(pose_clusters)
-        for pose_cluster in pose_clusters:
+        ranked_poses = sorted(
+            pose_clusters,
+            key=lambda cluster: (
+                -len(cluster),
+                min(item.ranking_score for item in cluster),
+                min(item.pose_id for item in cluster),
+            ),
+        )
+        retained_poses = ranked_poses[: settings.max_pose_clusters_per_site]
+        selected_pose_cluster_count += len(retained_poses)
+        for pose_cluster in retained_poses:
             medoid = _geometric_medoid(pose_cluster)
             rank_best = min(
                 pose_cluster,
@@ -506,7 +536,7 @@ def _pose_evidence(
     )
 
 
-def _raw_alignment(
+def align_trajectory_receptor(
     *,
     sequence: CabsSequenceChain,
     positions: tuple[Point3D, ...],
@@ -552,7 +582,7 @@ def _raw_alignment(
     return gemmi.superpose_positions(fixed, mobile)
 
 
-def _raw_ca_contacts(
+def trajectory_ca_contact_residues(
     *,
     sequence: CabsSequenceChain,
     receptor: tuple[Point3D, ...],
@@ -582,13 +612,13 @@ def _trajectory_frame_evidence(
 ) -> tuple[_FrameEvidence | None, float]:
     receptor = frame.chain_ca[0]
     peptide = frame.chain_ca[-1]
-    contacts = _raw_ca_contacts(
+    contacts = trajectory_ca_contact_residues(
         sequence=receptor_sequence,
         receptor=receptor,
         peptide=peptide,
         threshold_A=contact_threshold_A,
     )
-    alignment = _raw_alignment(
+    alignment = align_trajectory_receptor(
         sequence=receptor_sequence,
         positions=receptor,
         reference_chains=reference_chains,
@@ -643,7 +673,7 @@ def collect_cabsdock_evidence(
         _, peptide = split_model(model, peptide_sequence=chemistry.sequence)
         distance = disulfide_ca_distance(peptide=peptide, chemistry=chemistry)
         filtered_distances.append(distance)
-        if distance <= settings.max_disulfide_ca_distance_A:
+        if distance <= settings.max_reconstructable_disulfide_ca_distance_A:
             topology_by_replica[(model_index - 1) // per_replica] += 1
 
     archive_path = cabsdock_archive_path(task_dir)
@@ -652,7 +682,9 @@ def collect_cabsdock_evidence(
         chemistry=chemistry,
         replicas=settings.replicas,
         filtering_count=settings.filtering_count,
-        max_disulfide_ca_distance_A=settings.max_disulfide_ca_distance_A,
+        max_reconstructable_disulfide_ca_distance_A=(
+            settings.max_reconstructable_disulfide_ca_distance_A
+        ),
         filtered_topology_feasible_by_replica=tuple(topology_by_replica),
     )
     chains = read_cabs_sequence(archive_path)
@@ -665,7 +697,7 @@ def collect_cabsdock_evidence(
     for frame in iter_cabs_trajectory(archive_path=archive_path, chains=chains):
         distance = trajectory_disulfide_ca_distance(frame, chemistry=chemistry)
         trajectory_distances.append(distance)
-        if distance > settings.max_disulfide_ca_distance_A:
+        if distance > settings.max_reconstructable_disulfide_ca_distance_A:
             continue
         evidence, alignment_rmsd = _trajectory_frame_evidence(
             task=task,
@@ -694,6 +726,11 @@ def collect_cabsdock_evidence(
         selected_frames, site_count, pose_count, selected_pose_count = (
             _select_candidates(frames=tuple(eligible_frames), settings=selection)
         )
+        candidate_budget = (
+            selection.max_sites * selection.max_pose_clusters_per_site * 2
+        )
+        if len(selected_frames) > candidate_budget:
+            raise DiscoveryError("candidate selection exceeded its frozen task budget")
         identities = tuple(frame.identity for frame in selected_frames)
         if any(identity is None for identity in identities):
             raise DiscoveryError("trajectory candidate lacks its frame identity")
@@ -744,7 +781,7 @@ def collect_cabsdock_evidence(
         )
         feasible = (
             disulfide_ca_distance(peptide=peptide, chemistry=chemistry)
-            <= settings.max_disulfide_ca_distance_A
+            <= settings.max_reconstructable_disulfide_ca_distance_A
         )
         contacts = ca_contact_residues(
             receptor=receptor,
@@ -776,7 +813,7 @@ def collect_cabsdock_evidence(
 
     distance_values = tuple(trajectory_distances)
     filtered_topology_count = sum(
-        distance <= settings.max_disulfide_ca_distance_A
+        distance <= settings.max_reconstructable_disulfide_ca_distance_A
         for distance in filtered_distances
     )
     return CabsDockEvidence(

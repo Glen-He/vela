@@ -397,18 +397,33 @@ def build_topology_refine_command(
     disulfide_path: Path,
     output_dir: Path,
     seed: int,
+    site_constraint_path: Path,
+    site_constraint_weight: float,
     fixed_histidine_pose_indices: tuple[int, ...] = (),
 ) -> tuple[str, ...]:
     """建立单结构、无 native 参考的局部拓扑恢复精修命令。"""
-    return _refine_command(
-        command=_common_command(
+    if site_constraint_weight <= 0:
+        raise ValidationError("site coordinate constraint weight must be positive")
+    command = list(
+        _refine_command(
+            command=_common_command(
+                settings=settings,
+                input_path=input_path,
+                disulfide_path=disulfide_path,
+            ),
             settings=settings,
-            input_path=input_path,
-            disulfide_path=disulfide_path,
-        ),
-        settings=settings,
-        output_dir=output_dir,
-        seed=seed,
-        fixed_histidine_pose_indices=fixed_histidine_pose_indices,
-        nstruct=1,
+            output_dir=output_dir,
+            seed=seed,
+            fixed_histidine_pose_indices=fixed_histidine_pose_indices,
+            nstruct=1,
+        )
     )
+    command.extend(
+        (
+            "-constraints:cst_fa_file",
+            str(site_constraint_path),
+            "-constraints:cst_fa_weight",
+            str(site_constraint_weight),
+        )
+    )
+    return tuple(command)

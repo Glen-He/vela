@@ -95,11 +95,7 @@ def _config_check(config: AppConfig) -> int:
     )
     cabsdock = config.discovery.cabsdock
     print(f"CABS-dock executable: {cabsdock.executable}")
-    print(
-        "CABS-dock source: "
-        f"{cabsdock.source_dir} @ {cabsdock.source_revision}; "
-        f"patch={cabsdock.patch_file}"
-    )
+    print(f"CABS-dock source: {cabsdock.source_dir} @ {cabsdock.source_revision}")
     print(
         "CABS-dock sampling: "
         f"formal_seeds={len(config.discovery.seeds)}, "
@@ -115,11 +111,19 @@ def _config_check(config: AppConfig) -> int:
         "selection_pool=complete_traf, "
         "trajectory_contact_CA_A="
         f"{cabsdock.trajectory_contact_ca_threshold_A:g}, "
-        f"topology_CA_threshold_A={cabsdock.max_disulfide_ca_distance_A:g}, "
+        "disulfide_CA_restraint="
+        f"{cabsdock.disulfide_ca_restraint_distance_A:g}A/"
+        f"{cabsdock.disulfide_ca_restraint_weight:g}, "
+        "reconstructable_CA_envelope_A="
+        f"{cabsdock.max_reconstructable_disulfide_ca_distance_A:g}, "
         f"baseline_medoids={cabsdock.clustering_medoids}, "
         "selection=site_first_then_pose, "
         f"min_selection_models={cabsdock.min_models_for_selection}, "
-        "pose_cluster_coverage=complete"
+        f"max_sites_per_task={cabsdock.max_sites_per_task}, "
+        "max_pose_clusters_per_site="
+        f"{cabsdock.max_pose_clusters_per_site}, "
+        "max_candidates_per_task="
+        f"{cabsdock.max_sites_per_task * cabsdock.max_pose_clusters_per_site * 2}"
     )
     print("CABS-dock worker unit: seed batch; receptor conformations run sequentially")
     print(
@@ -135,8 +139,14 @@ def _config_check(config: AppConfig) -> int:
         f"seeds={len(qualification.seeds)}, "
         f"control={qualification.control_bound_state_id}, "
         f"native_LRMSD_A={qualification.max_native_ligand_rmsd_A:g}, "
-        "required_control_seeds="
-        f"{qualification.min_successful_control_seeds}"
+        "native_site_centroid_A="
+        f"{qualification.max_native_site_centroid_distance_A:g}, "
+        "sampling_seed_support="
+        f"{qualification.min_native_sampling_seed_support}, "
+        "site_seed_support="
+        f"{qualification.min_native_site_seed_support}, "
+        "selection_seed_recall="
+        f"{qualification.min_selection_native_seed_recall_fraction:g}"
     )
     topology = qualification.topology_calibration
     print(
@@ -147,7 +157,7 @@ def _config_check(config: AppConfig) -> int:
         "comparator_upper_A="
         f"{topology.above_threshold_comparator_upper_bound_A:g}, "
         "active_CA_threshold_A="
-        f"{config.discovery.cabsdock.max_disulfide_ca_distance_A:g}, "
+        f"{config.discovery.cabsdock.max_reconstructable_disulfide_ca_distance_A:g}, "
         f"models_per_stratum={topology.models_per_stratum}, "
         "min_success_fraction="
         f"{topology.min_success_fraction_per_stratum:g}, "

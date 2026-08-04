@@ -21,6 +21,7 @@ class RosettaScoreRow:
     scores: dict[str, float]
 
     def score(self, name: str) -> float:
+        """返回一个存在且有限的必需分值。"""
         try:
             return self.scores[name]
         except KeyError as exc:
@@ -35,7 +36,7 @@ def index_rosetta_pdb_outputs(directory: Path) -> dict[str, Path]:
 
 
 def read_rosetta_scorefile(path: Path) -> tuple[RosettaScoreRow, ...]:
-    """读取一个完整、有限值且 decoy 身份唯一的 scorefile。"""
+    """读取结构完整且身份唯一的 scorefile。只保留每行中的有限分值。"""
     if not path.is_file():
         raise ValidationError(f"Rosetta scorefile does not exist: {path}")
     header: tuple[str, ...] | None = None
@@ -83,11 +84,8 @@ def read_rosetta_scorefile(path: Path) -> tuple[RosettaScoreRow, ...]:
                 raise ValidationError(
                     f"invalid Rosetta score value at {path}:{line_number}"
                 ) from exc
-            if not math.isfinite(value):
-                raise ValidationError(
-                    f"non-finite Rosetta score value at {path}:{line_number}"
-                )
-            scores[name] = value
+            if math.isfinite(value):
+                scores[name] = value
         descriptions.add(description)
         rows.append(RosettaScoreRow(description, scores))
     if header is None or not rows:
