@@ -26,6 +26,8 @@ def run(argv: Sequence[str] | None = None) -> int:
     replication_run: object = getattr(arguments, "replication_run", None)
     refinement_source: object = getattr(arguments, "source_run", None)
     topology_source: object = getattr(arguments, "topology_source_run", None)
+    qualification_source: object = getattr(arguments, "qualification_run", None)
+    site_budget: object = getattr(arguments, "site_budget", None)
     design_source: object = getattr(arguments, "design_source_run", None)
     candidate_ids: object = getattr(arguments, "candidate_id", [])
     target_clusters: object = getattr(arguments, "target_cluster", [])
@@ -48,6 +50,12 @@ def run(argv: Sequence[str] | None = None) -> int:
         raise TypeError("parsed source_run is invalid")
     if topology_source is not None and not isinstance(topology_source, Path):
         raise TypeError("parsed topology source_run is invalid")
+    if qualification_source is not None and not isinstance(qualification_source, Path):
+        raise TypeError("parsed qualification_run is invalid")
+    if site_budget is not None and (
+        not isinstance(site_budget, int) or isinstance(site_budget, bool)
+    ):
+        raise TypeError("parsed site_budget is invalid")
     if design_source is not None and not isinstance(design_source, Path):
         raise TypeError("parsed design source_run is invalid")
     if target_id is not None and not isinstance(target_id, str):
@@ -85,6 +93,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         replication_run=replication_run,
         refinement_source=refinement_source,
         topology_source=topology_source,
+        qualification_source=qualification_source,
+        site_budget=site_budget,
         candidate_ids=tuple(parsed_candidate_ids),
         design_source=design_source,
         target_cluster_ids=tuple(parsed_clusters),

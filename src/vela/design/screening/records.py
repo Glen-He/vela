@@ -16,6 +16,7 @@ from vela.design.models import (
     ScreenTask,
     SequenceCandidate,
 )
+from vela.design.scores import SCREEN_SCORE_COLUMNS
 from vela.design.sequence.library import build_candidate
 from vela.design.sequence.neighborhood import candidate_parent_edit
 from vela.validation.records import (
@@ -58,10 +59,13 @@ def design_parameters(config: AppConfig) -> dict[str, JsonValue]:
             "score_function": settings.screen.score_function,
             "ranking_score": settings.screen.ranking_score,
             "pack_separated": settings.screen.pack_separated,
+            "ligand_chain": "P",
+            "pack_input": False,
+            "packstat": False,
+            "interface_sc": True,
+            "score_columns": SCREEN_SCORE_COLUMNS,
         },
         "combination": {
-            "min_mutations": settings.combination.min_mutations,
-            "max_mutations": settings.combination.max_mutations,
             "max_options_per_position": settings.combination.max_options_per_position,
             "max_candidates": settings.combination.max_candidates,
         },
@@ -72,12 +76,19 @@ def design_parameters(config: AppConfig) -> dict[str, JsonValue]:
         },
         "analysis": {
             "calibrated": settings.analysis.calibrated,
-            "max_positive_median_delta": settings.analysis.max_positive_median_delta,
-            "max_positive_worst_delta": settings.analysis.max_positive_worst_delta,
+            "max_median_paired_dG_separated_delta_REU": (
+                settings.analysis.max_median_paired_dG_separated_delta_REU
+            ),
+            "min_favorable_seed_fraction": (
+                settings.analysis.min_favorable_seed_fraction
+            ),
         },
         "finalists": {
             "parallel_tasks": settings.finalists.parallel_tasks,
             "max_candidates": settings.finalists.max_candidates,
+            "max_flexibility_required_candidates": (
+                settings.finalists.max_flexibility_required_candidates
+            ),
             "max_md_candidates": settings.finalists.max_md_candidates,
             "seeds": list(settings.finalists.seeds),
             "ranking_score": settings.finalists.ranking_score,
@@ -88,14 +99,8 @@ def design_parameters(config: AppConfig) -> dict[str, JsonValue]:
             "max_positive_median_ranking_delta": (
                 settings.finalists.max_positive_median_ranking_delta
             ),
-            "max_positive_worst_ranking_delta": (
-                settings.finalists.max_positive_worst_ranking_delta
-            ),
             "max_positive_median_interface_delta": (
                 settings.finalists.max_positive_median_interface_delta
-            ),
-            "max_positive_worst_interface_delta": (
-                settings.finalists.max_positive_worst_interface_delta
             ),
         },
     }
@@ -352,7 +357,7 @@ def read_screen_plan(*, config: AppConfig, run_dir: Path) -> ScreenPlan:
     """复核当前配置、工具、文件哈希和完整成对任务覆盖。"""
     plan = read_document(run_dir / SCREEN_PLAN_NAME, name="design screen plan")
     if (
-        plan.get("schema") != "vela.design-screen-plan/1"
+        plan.get("schema") != "vela.design-screen-plan/2"
         or plan.get("stage") != "design_interface_screen"
         or plan.get("status") != "planned"
         or not is_current_vela_software(plan.get("software"))
@@ -443,6 +448,9 @@ def read_screen_plan(*, config: AppConfig, run_dir: Path) -> ScreenPlan:
         state = row.get("state")
         if not isinstance(state, str):
             raise DesignError("design task state is invalid")
+        raw_wt_context_id = row.get("wt_context_id")
+        if state == "mutant" and raw_wt_context_id is not None:
+            raise DesignError("mutant design task must not declare a WT context")
         resfile_path, resfile_hash = validate_record(
             root=run_dir, raw=row.get("resfile"), name="design task resfile"
         )
@@ -461,6 +469,11 @@ def read_screen_plan(*, config: AppConfig, run_dir: Path) -> ScreenPlan:
                 nonnegative_integer(row.get("seed"), name="design seed"),
                 resfile_path,
                 resfile_hash,
+                (
+                    safe_identifier(row.get("wt_context_id"), name="WT context ID")
+                    if state == "wt"
+                    else None
+                ),
             )
         )
     expected_count = len(candidates) * len(templates) * len(config.design.seeds) * 2
@@ -480,6 +493,17 @@ def read_screen_plan(*, config: AppConfig, run_dir: Path) -> ScreenPlan:
         for items in pairs.values()
     ):
         raise DesignError("design WT/mutant pair coverage is invalid")
+    wt_contexts: dict[str, list[ScreenTask]] = {}
+    for task in tasks:
+        if task.wt_context_id is not None:
+            wt_contexts.setdefault(task.wt_context_id, []).append(task)
+    if any(
+        len({item.template.template_id for item in items}) != 1
+        or len({item.seed for item in items}) != 1
+        or len({item.resfile_sha256 for item in items}) != 1
+        for items in wt_contexts.values()
+    ):
+        raise DesignError("shared WT context inputs differ")
     verify_rosetta_scripts_tool(config.validation.rosetta)
     return ScreenPlan(
         run_dir,

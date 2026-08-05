@@ -141,6 +141,8 @@ def _bound_states(value: object) -> tuple[BoundStateDefinition, ...]:
         "ligand_author_chain_id",
         "local_control_kind",
         "ligand_sequence",
+        "ligand_n_terminus",
+        "ligand_c_terminus",
         "disulfide_bonds",
         "histidines",
         "selection_reason",
@@ -150,6 +152,8 @@ def _bound_states(value: object) -> tuple[BoundStateDefinition, ...]:
         section = document(item, name=path)
         assert_keys(section, allowed=required, required=required, path=path)
         raw_sequence = string(section, "ligand_sequence", path=path)
+        raw_n_terminus = string(section, "ligand_n_terminus", path=path)
+        raw_c_terminus = string(section, "ligand_c_terminus", path=path)
         result.append(
             BoundStateDefinition(
                 state_id=string(section, "state_id", path=path),
@@ -160,6 +164,12 @@ def _bound_states(value: object) -> tuple[BoundStateDefinition, ...]:
                 ),
                 local_control_kind=string(section, "local_control_kind", path=path),
                 ligand_sequence=(None if raw_sequence == UNRESOLVED else raw_sequence),
+                ligand_n_terminus=(
+                    None if raw_n_terminus == UNRESOLVED else raw_n_terminus
+                ),
+                ligand_c_terminus=(
+                    None if raw_c_terminus == UNRESOLVED else raw_c_terminus
+                ),
                 disulfide_bonds=_disulfides(
                     section["disulfide_bonds"], path=f"{path}.disulfide_bonds"
                 ),

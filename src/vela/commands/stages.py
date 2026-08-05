@@ -54,6 +54,9 @@ from vela.validation.assessment.environment import (
 from vela.validation.bound_states.assets import prepare_bound_state_assets
 from vela.validation.bound_states.comparison import compare_replication_run
 from vela.validation.bound_states.controls import write_qualification_plan
+from vela.validation.bound_states.qualification import (
+    analyze_qualification as analyze_validation_qualification,
+)
 from vela.validation.bound_states.qualification import run_qualification
 from vela.validation.bound_states.replication import write_replication_plan
 from vela.validation.models import ValidationError
@@ -67,6 +70,17 @@ from vela.validation.refinement.guided import run_guided_handoff, write_guided_p
 from vela.validation.refinement.handoff_plan import write_handoff_plan
 from vela.validation.refinement.handoff_run import run_handoff
 from vela.validation.refinement.planning import write_refinement_plan
+from vela.validation.refinement.qualification_analysis import (
+    analyze_qualification_refinement,
+)
+from vela.validation.refinement.qualification_diagnostic import (
+    run_qualification_refinement,
+    write_qualification_refinement_plan,
+)
+from vela.validation.refinement.qualification_handoff import (
+    run_qualification_handoff,
+    write_qualification_handoff_plan,
+)
 from vela.validation.refinement.reconstruction import verify_cg2all_tool
 from vela.validation.rosetta import (
     verify_flexpepdock_tool,
@@ -504,7 +518,17 @@ def validation_control_run(*, config: AppConfig, run_dir: Path) -> int:
     print(f"Validation control qualified: {str(outcome.qualified).lower()}")
     print(f"Qualification report: {outcome.report_path}")
     print(f"Qualification report SHA-256: {sha256_file(outcome.report_path)}")
-    return 0 if outcome.qualified else 4
+    return 0
+
+
+def validation_control_analyze(*, config: AppConfig, run_dir: Path) -> int:
+    """使用当前分析合同重新分析完整控制任务; 不覆盖历史报告。"""
+    resolved = _validation_run_dir(config=config, run_dir=run_dir, category="controls")
+    outcome = analyze_validation_qualification(config=config, run_dir=resolved)
+    print(f"Validation control qualified: {str(outcome.qualified).lower()}")
+    print(f"Qualification report: {outcome.report_path}")
+    print(f"Qualification report SHA-256: {sha256_file(outcome.report_path)}")
+    return 0
 
 
 def validation_replication_plan(
@@ -588,6 +612,86 @@ def validation_handoff_run(*, config: AppConfig, run_dir: Path) -> int:
     outcome = run_handoff(config=config, run_dir=resolved)
     print(f"Validation handoff completed: {outcome.manifest_path}")
     print(f"Handoff tasks completed: {outcome.task_count}")
+    return 0
+
+
+def validation_qualification_handoff_plan(
+    *, config: AppConfig, qualification_run: Path, run_id: str, site_budget: int
+) -> int:
+    """冻结资格控制的 native-free Top-B 开发交接。"""
+    source = _qualification_run_dir(config=config, run_dir=qualification_run)
+    plan = write_qualification_handoff_plan(
+        config=config,
+        qualification_run_dir=source,
+        run_id=run_id,
+        site_budget=site_budget,
+    )
+    print(
+        "Validation qualification handoff plan written: "
+        f"{plan.run_dir / 'qualification_handoff_plan.json'}"
+    )
+    print(f"Planned qualification handoff tasks: {len(plan.tasks)}")
+    return 0
+
+
+def validation_qualification_handoff_run(*, config: AppConfig, run_dir: Path) -> int:
+    """执行或恢复开发性交接; 不把结果晋升为正式资格。"""
+    resolved = _validation_run_dir(
+        config=config, run_dir=run_dir, category="qualification_handoffs"
+    )
+    outcome = run_qualification_handoff(config=config, run_dir=resolved)
+    print(f"Validation qualification handoff completed: {outcome.manifest_path}")
+    print(f"Qualification handoff tasks completed: {outcome.task_count}")
+    return 0
+
+
+def validation_qualification_refinement_plan(
+    *, config: AppConfig, source_run: Path, control_run: Path, run_id: str
+) -> int:
+    """冻结依赖方法阳性对照的 native-aware 阶段二到三恢复诊断。"""
+    source = _validation_run_dir(
+        config=config, run_dir=source_run, category="qualification_handoffs"
+    )
+    control = _validation_run_dir(
+        config=config, run_dir=control_run, category="controls"
+    )
+    plan = write_qualification_refinement_plan(
+        config=config,
+        handoff_run_dir=source,
+        control_run_dir=control,
+        run_id=run_id,
+    )
+    print(
+        "Validation qualification refinement plan written: "
+        f"{plan.run_dir / 'qualification_refinement_plan.json'}"
+    )
+    print(f"Planned qualification refinement tasks: {len(plan.tasks)}")
+    return 0
+
+
+def validation_qualification_refinement_run(*, config: AppConfig, run_dir: Path) -> int:
+    """执行 native-aware 开发恢复诊断; 不改变正式资格状态。"""
+    resolved = _validation_run_dir(
+        config=config, run_dir=run_dir, category="qualification_refinements"
+    )
+    outcome = run_qualification_refinement(config=config, run_dir=resolved)
+    print(f"Validation qualification refinement completed: {outcome.manifest_path}")
+    print(f"Qualification refinement tasks completed: {outcome.task_count}")
+    return 0
+
+
+def validation_qualification_refinement_analyze(
+    *, config: AppConfig, run_dir: Path
+) -> int:
+    """分析 native-aware 开发诊断; 不改变任何正式资格状态。"""
+    resolved = _validation_run_dir(
+        config=config, run_dir=run_dir, category="qualification_refinements"
+    )
+    outcome = analyze_qualification_refinement(config=config, run_dir=resolved)
+    print(f"Qualification refinement analysis written: {outcome.report_path}")
+    print(f"Chemistry-valid decoys analyzed: {outcome.valid_decoy_count}")
+    print(f"Refinement clusters analyzed: {outcome.cluster_count}")
+    print(f"Recovery supported: {str(outcome.recovery_supported).lower()}")
     return 0
 
 

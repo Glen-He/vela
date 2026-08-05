@@ -73,7 +73,7 @@ def _selected_candidates(
 ) -> tuple[tuple[SequenceCandidate, ...], list[dict[str, str]]]:
     manifest = read_document(analysis_path, name="design screen analysis")
     if (
-        manifest.get("schema") != "vela.design-screen-analysis-manifest/1"
+        manifest.get("schema") != "vela.design-screen-analysis-manifest/2"
         or manifest.get("status") != "completed"
         or manifest.get("design_round") != plan.design_round
         or manifest.get("objective") != config.design.objective
@@ -89,30 +89,46 @@ def _selected_candidates(
         required=frozenset(
             {
                 "candidate_id",
-                "positive_median_delta_score",
-                "positive_worst_delta_score",
+                "positive_median_paired_dG_separated_delta_REU",
+                "favorable_seed_fraction",
                 "candidate_status",
+                "flexibility_reasons",
             }
         ),
     )
     by_id = {item.candidate_id: item for item in plan.candidates}
-    ranked: list[tuple[tuple[float, float, str], SequenceCandidate]] = []
+    supported: list[tuple[tuple[float, float, str], SequenceCandidate, str]] = []
+    flexible: list[tuple[tuple[float, float, str], SequenceCandidate, str]] = []
     for row in rows:
-        if row["candidate_status"] != "eligible":
+        status = row["candidate_status"]
+        if status not in {"screen_supported", "flexibility_required"}:
             continue
         candidate = by_id.get(row["candidate_id"])
         if candidate is None:
             raise DesignError("finalist source references an unknown candidate")
-        worst = _finite(row["positive_worst_delta_score"], name="positive worst score")
         median = _finite(
-            row["positive_median_delta_score"], name="positive median score"
+            row["positive_median_paired_dG_separated_delta_REU"],
+            name="positive median paired dG_separated delta",
         )
-        ranked.append(((worst, median, candidate.candidate_id), candidate))
-    ranked.sort(key=lambda item: item[0])
-    if not ranked:
+        favorable_fraction = _finite(
+            row["favorable_seed_fraction"], name="favorable seed fraction"
+        )
+        rank = (median, -favorable_fraction, candidate.candidate_id)
+        entry = (rank, candidate, row["flexibility_reasons"])
+        (flexible if status == "flexibility_required" else supported).append(entry)
+    supported.sort(key=lambda item: item[0])
+    flexible.sort(key=lambda item: item[0])
+    if not supported and not flexible:
         raise DesignError("screen analysis produced no eligible flexible finalists")
     limit = config.design.finalists.max_candidates
-    selected = tuple(item[1] for item in ranked[:limit])
+    flexible_limit = config.design.finalists.max_flexibility_required_candidates
+    selected_entries = [
+        *flexible[:flexible_limit],
+        *supported[: max(0, limit - min(len(flexible), flexible_limit))],
+    ]
+    selected_ids = {item[1].candidate_id for item in selected_entries}
+    selected = tuple(item[1] for item in selected_entries)
+    ranked = sorted((*supported, *flexible), key=lambda item: item[0])
     selection_rows = [
         {
             "candidate_id": item[1].candidate_id,
@@ -122,11 +138,16 @@ def _selected_candidates(
             "parent_candidate_ids": ";".join(
                 parent.candidate_id for parent in item[1].parents
             ),
-            "selection_status": "selected" if index < limit else "resource_deferred",
-            "source_positive_worst_delta": f"{item[0][0]:.6f}",
-            "source_positive_median_delta": f"{item[0][1]:.6f}",
+            "selection_status": (
+                "selected"
+                if item[1].candidate_id in selected_ids
+                else "resource_deferred"
+            ),
+            "source_median_paired_dG_separated_delta_REU": f"{item[0][0]:.6f}",
+            "source_favorable_seed_fraction": f"{-item[0][1]:.6f}",
+            "flexibility_reasons": item[2],
         }
-        for index, item in enumerate(ranked)
+        for item in ranked
     ]
     return selected, selection_rows
 
@@ -135,7 +156,7 @@ def _screen_results(*, plan: ScreenPlan) -> dict[str, Path]:
     manifest_path = plan.run_dir / "screen_manifest.json"
     manifest = read_document(manifest_path, name="finalist source screen manifest")
     if (
-        manifest.get("schema") != "vela.design-screen-manifest/1"
+        manifest.get("schema") != "vela.design-screen-manifest/2"
         or manifest.get("status") != "completed"
         or manifest.get("design_round") != plan.design_round
     ):
@@ -232,13 +253,21 @@ def _copy_starts(
                 result_path = result_paths[screen_task.task_id]
                 result = read_document(result_path, name="source screen task result")
                 if (
-                    result.get("schema") != "vela.design-screen-task-result/1"
+                    result.get("schema") != "vela.design-screen-task-result/2"
                     or result.get("status") != "completed"
-                    or result.get("task_id") != screen_task.task_id
                     or result.get("state") != state
                     or result.get("seed") != source_seed
                 ):
                     raise DesignError("finalist source task result identity is invalid")
+                if state == "mutant" and (
+                    result.get("task_id") != screen_task.task_id
+                    or result.get("wt_context_id") is not None
+                ):
+                    raise DesignError("finalist mutant source identity is invalid")
+                if state == "wt" and (
+                    result.get("wt_context_id") != screen_task.wt_context_id
+                ):
+                    raise DesignError("finalist shared WT source identity is invalid")
                 source_path, _ = validate_record(
                     root=result_path.parent,
                     raw=result.get("output"),
@@ -304,8 +333,9 @@ def _selection_table(rows: list[dict[str, str]]) -> str:
         "generation",
         "parent_candidate_ids",
         "selection_status",
-        "source_positive_worst_delta",
-        "source_positive_median_delta",
+        "source_median_paired_dG_separated_delta_REU",
+        "source_favorable_seed_fraction",
+        "flexibility_reasons",
     )
     output = ["\t".join(fields)]
     output.extend("\t".join(row[field] for field in fields) for row in rows)

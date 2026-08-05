@@ -7,9 +7,7 @@ ranking_score = "dG_separated"
 pack_separated = true
 
 [design.combination]
-# 多突变只由已通过单点门槛的替换提出，随后必须作为完整序列重新计算。
-min_mutations = 2
-max_mutations = 3
+# 首轮组合只计算双突变；三突变及以上只能从已验证父序列逐代产生。
 max_options_per_position = 3
 max_candidates = 96
 
@@ -23,6 +21,7 @@ max_candidates = 256
 # 组合初筛后只让有限候选进入昂贵的多 seed FlexPepDock 柔性复核。
 parallel_tasks = 1
 max_candidates = 12
+max_flexibility_required_candidates = 4
 max_md_candidates = 5
 seeds = []
 ranking_score = "reweighted_sc"
@@ -31,6 +30,4 @@ calibrated = false
 min_passed_decoy_fraction = "unresolved"
 min_successful_seeds = "unresolved"
 max_positive_median_ranking_delta = "unresolved"
-max_positive_worst_ranking_delta = "unresolved"
 max_positive_median_interface_delta = "unresolved"
-max_positive_worst_interface_delta = "unresolved"

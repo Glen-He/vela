@@ -17,10 +17,14 @@ from vela.validation.refinement.planning import (
     refinement_identity,
     verify_refinement_plan,
 )
-from vela.validation.refinement.reconstruction import write_disulfide_indices
+from vela.validation.refinement.reconstruction import (
+    write_chemistry_prepack_protocol,
+    write_chemistry_production_refine_protocol,
+    write_disulfide_indices,
+)
 from vela.validation.rosetta import (
-    build_prepack_command,
-    build_refine_command,
+    build_chemistry_flexpepdock_command,
+    rosetta_crash_log_dir,
     run_rosetta_command,
 )
 from vela.validation.scores import (
@@ -65,13 +69,14 @@ def _resume_prepack(
         directory=start_dir,
         filename="prepack_result.json",
         document_name="refinement prepack result",
-        schema="vela.validation-refinement-prepack-result/1",
+        schema="vela.validation-refinement-prepack-result/2",
         identity={"start_id": start.start_id},
         plan_hash_key="refinement_plan_sha256",
         plan_hash=plan_hash,
         records={
             "output": "prepack output",
             "fix_disulfide": "prepack disulfide",
+            "protocol": "prepack protocol",
             "scorefile": "prepack scorefile",
             "log": "prepack log",
         },
@@ -102,21 +107,37 @@ def _prepare_start(
         receptor_residue_count=start.receptor_residue_count,
         chemistry=config.chemistry,
     )
-    command = build_prepack_command(
+    protocol_path = start_dir / "prepack.xml"
+    write_chemistry_prepack_protocol(
+        destination=protocol_path,
+        receptor_residue_count=start.receptor_residue_count,
+        chemistry=config.chemistry,
+        score_function=config.validation.rosetta.score_function,
+    )
+    command = build_chemistry_flexpepdock_command(
         settings=config.validation.rosetta,
         input_path=start.input_path,
+        protocol_path=protocol_path,
         disulfide_path=disulfide_path,
         output_dir=start_dir,
         seed=config.validation.refinement.prepack_seed,
         fixed_histidine_pose_indices=start.fixed_histidine_pose_indices,
+        nstruct=1,
+        scorefile_name="prepack.sc",
+        native_path=None,
     )
     log_path = start_dir / "prepack.log"
-    run_rosetta_command(command=command, log_path=log_path, thread_count=1)
+    run_rosetta_command(
+        command=command,
+        log_path=log_path,
+        crash_dir=rosetta_crash_log_dir(outputs_dir=config.paths.outputs_dir),
+        thread_count=1,
+    )
     output, score_path = _single_output(start_dir, score_name="prepack.sc")
     atomic_write_json(
         start_dir / "prepack_result.json",
         {
-            "schema": "vela.validation-refinement-prepack-result/1",
+            "schema": "vela.validation-refinement-prepack-result/2",
             "status": "completed",
             "start_id": start.start_id,
             "refinement_plan_sha256": plan_hash,
@@ -124,6 +145,7 @@ def _prepare_start(
             "output": file_record(output, root=start_dir),
             "scorefile": file_record(score_path, root=start_dir),
             "fix_disulfide": file_record(disulfide_path, root=start_dir),
+            "protocol": file_record(protocol_path, root=start_dir),
             "log": file_record(log_path, root=start_dir),
         },
     )
@@ -143,13 +165,14 @@ def _run_task(
         directory=task_dir,
         filename="task_result.json",
         document_name="refinement task result",
-        schema="vela.validation-refinement-task-result/1",
+        schema="vela.validation-refinement-task-result/2",
         identity={"task_id": task.task_id},
         plan_hash_key="refinement_plan_sha256",
         plan_hash=plan_hash,
         records={
             "scorefile": "task scorefile",
             "decoy_manifest": "task decoy_manifest",
+            "protocol": "refinement protocol",
             "log": "task log",
         },
         stale_label="refinement task",
@@ -159,20 +182,35 @@ def _run_task(
     if task_dir.exists():
         raise ValidationError(f"incomplete refinement task requires review: {task_dir}")
     task_dir.mkdir(parents=True)
-    command = build_refine_command(
+    protocol_path = task_dir / "refine.xml"
+    write_chemistry_production_refine_protocol(
+        destination=protocol_path,
+        receptor_residue_count=task.start.receptor_residue_count,
+        chemistry=config.chemistry,
+        score_function=config.validation.rosetta.score_function,
+        random_translation_A=config.validation.refinement.random_translation_A,
+        random_rotation_degrees=config.validation.refinement.random_rotation_degrees,
+        lowres_preoptimize=config.validation.rosetta.lowres_preoptimize,
+    )
+    command = build_chemistry_flexpepdock_command(
         settings=config.validation.rosetta,
         input_path=prepared.prepacked_path,
+        protocol_path=protocol_path,
         disulfide_path=prepared.disulfide_path,
         output_dir=task_dir,
         seed=task.seed,
         native_path=task.start.input_path,
-        random_translation_A=config.validation.refinement.random_translation_A,
-        random_rotation_degrees=config.validation.refinement.random_rotation_degrees,
         fixed_histidine_pose_indices=task.start.fixed_histidine_pose_indices,
+        nstruct=config.validation.rosetta.decoys_per_seed,
+        scorefile_name="refine.sc",
     )
     log_path = task_dir / "refine.log"
     started_at = utc_now()
-    run_rosetta_command(command=command, log_path=log_path)
+    run_rosetta_command(
+        command=command,
+        log_path=log_path,
+        crash_dir=rosetta_crash_log_dir(outputs_dir=config.paths.outputs_dir),
+    )
     score_path = task_dir / "refine.sc"
     rows = read_rosetta_scorefile(score_path)
     if len(rows) != config.validation.rosetta.decoys_per_seed:
@@ -190,7 +228,7 @@ def _run_task(
     atomic_write_json(
         result_path,
         {
-            "schema": "vela.validation-refinement-task-result/1",
+            "schema": "vela.validation-refinement-task-result/2",
             "status": "completed",
             "task_id": task.task_id,
             "start_id": task.start.start_id,
@@ -207,6 +245,7 @@ def _run_task(
             "command": list(command),
             "scorefile": file_record(score_path, root=task_dir),
             "decoy_manifest": file_record(decoy_manifest, root=task_dir),
+            "protocol": file_record(protocol_path, root=task_dir),
             "log": file_record(log_path, root=task_dir),
         },
     )
@@ -246,7 +285,7 @@ def run_refinement(*, config: AppConfig, run_dir: Path) -> RefinementOutcome:
     atomic_write_json(
         manifest_path,
         {
-            "schema": "vela.validation-refinement-manifest/1",
+            "schema": "vela.validation-refinement-manifest/2",
             "stage": "validation_local_refinement",
             "status": "completed",
             "completed_at": utc_now(),

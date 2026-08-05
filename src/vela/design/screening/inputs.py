@@ -33,7 +33,7 @@ def _source_identity(
     plan_path = run_dir / "refinement_plan.json"
     plan = read_document(plan_path, name="design source refinement plan")
     if (
-        plan.get("schema") != "vela.validation-refinement-plan/1"
+        plan.get("schema") != "vela.validation-refinement-plan/2"
         or plan.get("stage") != "validation_local_refinement"
         or plan.get("status") != "planned"
         or plan.get("chemistry_id") != config.chemistry.chemistry_id
@@ -63,7 +63,7 @@ def _source_identity(
         run_dir / "refinement_manifest.json", name="design source refinement manifest"
     )
     if (
-        manifest.get("schema") != "vela.validation-refinement-manifest/1"
+        manifest.get("schema") != "vela.validation-refinement-manifest/2"
         or manifest.get("stage") != "validation_local_refinement"
         or manifest.get("status") != "completed"
         or manifest.get("chemistry_id") != config.chemistry.chemistry_id

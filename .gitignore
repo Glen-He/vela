@@ -18,6 +18,7 @@ wheels/
 /data/
 /temp/
 /legacy/
+/logs/
 *.log
 
 # OS files
@@ -27,4 +28,3 @@ Thumbs.db
 # Secrets / environment
 .env
 .env.*
-!.env.example

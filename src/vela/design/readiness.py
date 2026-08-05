@@ -101,8 +101,8 @@ def assess_design_readiness(config: AppConfig) -> DesignReadiness:
     if not config.validation.config_complete:
         finalist.append(
             DesignIssue(
-                "flexpepdock_not_qualified",
-                "Stage 4 finalists require the qualified Stage 3 FlexPepDock protocol",
+                "flexpepdock_contract_incomplete",
+                "Stage 4 finalists require qualified FlexPepDock and calibrated Stage 3 geometry rules",
             )
         )
     else:

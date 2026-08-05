@@ -1,6 +1,6 @@
 [validation]
 # 阶段三先完成工具和方法阳性对照资格，不能用未校准阈值筛选 P15。
-method_id = "flexpepdock-local-refine-disulfide-v1"
+method_id = "flexpepdock-local-refine-disulfide"
 qualification_status = "unresolved"
 qualification_report = "unresolved"
 qualification_report_sha256 = "unresolved"
@@ -33,6 +33,8 @@ ligand_id = "Pc"
 ligand_author_chain_id = "D"
 local_control_kind = "standard_cyclic_peptide"
 ligand_sequence = "GCRLYGFKIHGCG"
+ligand_n_terminus = "Acetyl"
+ligand_c_terminus = "CONH2"
 disulfide_bonds = [[2, 12]]
 histidines = {"10" = "HIE"}
 selection_reason = "A-D is the primary CK2α-Pc pair; it has 186 heavy-atom contacts within 4.5 Å and the lowest-B-factor directly paired Pc copy."
@@ -44,6 +46,8 @@ ligand_id = "FMP37"
 ligand_author_chain_id = "F"
 local_control_kind = "site_reference_only"
 ligand_sequence = "unresolved"
+ligand_n_terminus = "unresolved"
+ligand_c_terminus = "unresolved"
 disulfide_bonds = []
 histidines = {}
 selection_reason = "A-F is the best-resolved directly paired CK2α-FMP37 copy; the noncanonical peptidomimetic is retained as a site reference, not forced into standard peptide redocking."
@@ -55,6 +59,8 @@ ligand_id = "FMP37"
 ligand_author_chain_id = "E"
 local_control_kind = "site_reference_only"
 ligand_sequence = "unresolved"
+ligand_n_terminus = "unresolved"
+ligand_c_terminus = "unresolved"
 disulfide_bonds = []
 histidines = {}
 selection_reason = "Only CK2α′ author chain A contacts FMP37 chain E; chain B is 47.98 Å away and is not treated as a bound copy."

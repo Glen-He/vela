@@ -28,17 +28,28 @@ from vela.validation.refinement.geometry import (
     cluster_refined_decoys,
 )
 from vela.validation.refinement.planning import build_refinement_tasks
+from vela.validation.refinement.qualification_analysis import (
+    DiagnosticDecoy,
+    cluster_diagnostic_decoys,
+)
+from vela.validation.refinement.qualification_diagnostic import (
+    validated_handoff_task_counts,
+)
 from vela.validation.refinement.reconstruction import (
     assess_topology_reconstruction,
     build_cg2all_command,
     write_cg2all_input,
     write_chemistry_protocol,
+    write_chemistry_refine_protocol,
     write_reference_receptor_complex,
 )
 from vela.validation.rosetta import (
     build_chemistry_command,
+    build_chemistry_refine_command,
     build_prepack_command,
     build_refine_command,
+    rosetta_crash_log_dir,
+    run_rosetta_command,
 )
 from vela.validation.scores import read_rosetta_scorefile
 
@@ -106,6 +117,8 @@ def test_project_config_registers_distinct_bound_state_evidence() -> None:
     ]
     assert settings.bound_states[0].local_control_kind == "standard_cyclic_peptide"
     assert settings.bound_states[0].ligand_sequence == "GCRLYGFKIHGCG"
+    assert settings.bound_states[0].ligand_n_terminus == "Acetyl"
+    assert settings.bound_states[0].ligand_c_terminus == "CONH2"
     assert settings.bound_states[0].disulfide_bonds == (DisulfideBond(2, 12),)
     assert settings.bound_states[0].histidines == (HistidineState(10, "HIE"),)
     assert all(
@@ -145,6 +158,8 @@ def test_standard_control_rejects_invalid_disulfide_definition(
             ligand_author_chain_id="D",
             local_control_kind="standard_cyclic_peptide",
             ligand_sequence=sequence,
+            ligand_n_terminus="NH3+",
+            ligand_c_terminus="CONH2",
             disulfide_bonds=(bond,),
             histidines=(),
             selection_reason="test",
@@ -480,6 +495,7 @@ def test_chemistry_restoration_uses_declared_score_and_seed(tmp_path: Path) -> N
         disulfide_path=Path("fix_disulfide.txt"),
         output_dir=tmp_path,
         seed=3101,
+        fixed_histidine_pose_indices=(338,),
     )
 
     protocol_text = protocol.read_text(encoding="utf-8")
@@ -493,6 +509,65 @@ def test_chemistry_restoration_uses_declared_score_and_seed(tmp_path: Path) -> N
     assert 'target="338"' in protocol_text
     assert command[0] == str(config.validation.rosetta.scripts_executable)
     assert command[command.index("-jran") + 1] == "3101"
+    assert command[command.index("-packing:fix_his_tautomer") + 1] == "338"
+
+
+def test_chemistry_restoration_supports_declared_n_terminal_acetylation(
+    tmp_path: Path,
+) -> None:
+    config = load_config(PROJECT_CONFIG)
+    protocol = tmp_path / "restore_acetyl.xml"
+
+    write_chemistry_protocol(
+        destination=protocol,
+        receptor_residue_count=331,
+        chemistry=replace(config.chemistry, n_terminus="Acetyl"),
+        score_function="ref2015",
+    )
+
+    text = protocol.read_text(encoding="utf-8")
+    assert 'name="peptide_n_terminus" resnums="332"' in text
+    assert 'add_type="N_ACETYLATION"' in text
+    assert 'remove_type="LOWER_TERMINUS_VARIANT"' in text
+    assert 'name="remove_n_terminal_charge"' in text
+    assert 'name="add_n_terminal_acetyl"' in text
+    assert text.index('<Add mover="add_c_terminal_amide" />') < text.index(
+        '<Add mover="form_disulfides" />'
+    )
+
+
+def test_terminal_chemistry_refine_stays_in_one_rosetta_pose(tmp_path: Path) -> None:
+    config = load_config(PROJECT_CONFIG)
+    protocol = tmp_path / "restore_and_refine.xml"
+    constraint = tmp_path / "site.cst"
+    constraint.write_text("constraint\n", encoding="utf-8")
+    write_chemistry_refine_protocol(
+        destination=protocol,
+        receptor_residue_count=331,
+        chemistry=replace(config.chemistry, n_terminus="Acetyl"),
+        score_function="ref2015",
+    )
+
+    command = build_chemistry_refine_command(
+        settings=config.validation.rosetta,
+        input_path=Path("input.pdb"),
+        protocol_path=protocol,
+        disulfide_path=Path("fix_disulfide.txt"),
+        output_dir=tmp_path,
+        seed=3101,
+        fixed_histidine_pose_indices=(338,),
+        site_constraint_path=constraint,
+        site_constraint_weight=1.0,
+    )
+
+    text = protocol.read_text(encoding="utf-8")
+    assert '<FlexPepDock name="run_flexpepdock"' in text
+    assert text.index('<Add mover="form_disulfides" />') < text.index(
+        '<Add mover="run_flexpepdock" />'
+    )
+    assert command[command.index("-flexPepDocking:receptor_chain") + 1] == "A"
+    assert command[command.index("-flexPepDocking:peptide_chain") + 1] == "P"
+    assert command[command.index("-constraints:cst_fa_file") + 1] == str(constraint)
 
 
 def _all_atom_chain(
@@ -651,6 +726,8 @@ def test_control_recovery_pools_seed_batches_and_requires_repeatable_clusters(
         definition=config.validation.bound_states[0],
         complex_path=native_path,
         disulfide_path=tmp_path / "fix_disulfide.txt",
+        chemistry=config.chemistry,
+        receptor_residue_count=3,
         fixed_histidine_pose_indices=(),
     )
     tasks: list[ControlTask] = []
@@ -690,6 +767,58 @@ def test_control_recovery_pools_seed_batches_and_requires_repeatable_clusters(
     )
 
 
+def test_control_recovery_uses_cluster_medoid_for_batch_pose_consistency(
+    tmp_path: Path,
+) -> None:
+    config = load_config(PROJECT_CONFIG)
+    control = _local_control()
+    native_path = tmp_path / "native.pdb"
+    _flexpepdock_input(native_path)
+    control_input = ControlInput(
+        definition=config.validation.bound_states[0],
+        complex_path=native_path,
+        disulfide_path=tmp_path / "fix_disulfide.txt",
+        chemistry=config.chemistry,
+        receptor_residue_count=3,
+        fixed_histidine_pose_indices=(),
+    )
+    tasks: list[ControlTask] = []
+    for batch_index, batch in enumerate(control.seed_batches, 1):
+        batch_id = f"batch_{batch_index:02d}"
+        extreme_y = 2.9 if batch_index == 1 else 5.1
+        for seed_index, seed in enumerate(batch):
+            task_id = f"{control.control_id}__{batch_id}__seed_{seed}"
+            tasks.append(ControlTask(task_id, control, control_input, batch_id, seed))
+            task_dir = tmp_path / "tasks" / task_id
+            task_dir.mkdir(parents=True)
+            _flexpepdock_input(task_dir / "center.pdb")
+            rows = ["SCORE: -9.0 -1.0 0.5 center\n"]
+            if seed_index == 0:
+                _flexpepdock_input(task_dir / "energy_best.pdb", peptide_y=extreme_y)
+                rows.insert(0, "SCORE: -10.0 -2.0 0.5 energy_best\n")
+            (task_dir / "refine.sc").write_text(
+                "SCORE: total_score custom_rank custom_rmsd description\n"
+                + "".join(rows),
+                encoding="utf-8",
+            )
+
+    passed, report = analyze_control_recovery(
+        control=control, tasks=tuple(tasks), run_dir=tmp_path
+    )
+
+    assert passed
+    assert report["batch_poses_consistent"] is True
+    assert report["maximum_observed_batch_pose_rmsd_A"] == pytest.approx(0.0)
+    batches = report["batches"]
+    assert isinstance(batches, list)
+    assert all(
+        isinstance(batch, dict)
+        and batch["selected_energy_representative_decoy_id"]
+        != batch["selected_geometric_medoid_decoy_id"]
+        for batch in batches
+    )
+
+
 def test_refinement_tasks_are_derived_from_handoff_and_configured_seeds(
     tmp_path: Path,
 ) -> None:
@@ -709,7 +838,7 @@ def test_refinement_tasks_are_derived_from_handoff_and_configured_seeds(
     atomic_write_json(
         run_dir / "handoff_manifest.json",
         {
-            "schema": "vela.validation-handoff-manifest/3",
+            "schema": "vela.validation-handoff-manifest/7",
             "status": "completed",
             "chemistry_id": config.chemistry.chemistry_id,
             "evidence_category": "main_discovery_handoff",
@@ -727,6 +856,8 @@ def test_refinement_tasks_are_derived_from_handoff_and_configured_seeds(
                     "receptor_id": "RECEPTOR_001",
                     "target": "TARGET_001",
                     "source_seed": 2101,
+                    "execution_status": "completed",
+                    "reconstruction_status": "passed",
                     "task_result": {
                         "path": result_path.relative_to(run_dir).as_posix(),
                         "sha256": sha256_file(result_path),
@@ -745,6 +876,87 @@ def test_refinement_tasks_are_derived_from_handoff_and_configured_seeds(
     assert [task.task_id for task in tasks] == ["refine_00001", "refine_00002"]
     assert [task.seed for task in tasks] == [4101, 4103]
     assert all(task.start.candidate_id == "CANDIDATE_001" for task in tasks)
+
+
+def test_refinement_rejects_technically_invalid_handoff(tmp_path: Path) -> None:
+    config = load_config(PROJECT_CONFIG)
+    run_dir = tmp_path / "handoff"
+    result_path = run_dir / "tasks" / "source_001" / "task_result.json"
+    atomic_write_json(result_path, {"status": "completed"})
+    plan_path = run_dir / "handoff_plan.json"
+    atomic_write_json(plan_path, {"status": "planned"})
+    atomic_write_json(
+        run_dir / "handoff_manifest.json",
+        {
+            "schema": "vela.validation-handoff-manifest/7",
+            "status": "completed",
+            "chemistry_id": config.chemistry.chemistry_id,
+            "evidence_category": "main_discovery_handoff",
+            "known_site_information_used": False,
+            "handoff_plan": {
+                "path": plan_path.relative_to(run_dir).as_posix(),
+                "sha256": sha256_file(plan_path),
+            },
+            "tasks": [
+                {
+                    "task_id": "source_001",
+                    "candidate_id": "CANDIDATE_001",
+                    "receptor_site_id": "SITE_001",
+                    "pose_id": "POSE_001",
+                    "receptor_id": "RECEPTOR_001",
+                    "target": "TARGET_001",
+                    "source_seed": 2101,
+                    "execution_status": "invalid",
+                    "reconstruction_status": "not_assessed",
+                    "task_result": {
+                        "path": result_path.relative_to(run_dir).as_posix(),
+                        "sha256": sha256_file(result_path),
+                    },
+                    "flexpepdock_input": None,
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(ValidationError, match="invalid handoff task"):
+        build_refinement_tasks(config=config, source_run_dir=run_dir)
+
+
+def test_qualification_diagnostic_allows_candidate_qc_attrition() -> None:
+    manifest: dict[str, object] = {
+        "passed_task_count": 1,
+        "failed_task_count": 1,
+        "invalid_task_count": 0,
+        "tasks": [
+            {
+                "execution_status": "completed",
+                "reconstruction_status": "passed",
+            },
+            {
+                "execution_status": "completed",
+                "reconstruction_status": "failed",
+            },
+        ],
+    }
+
+    assert validated_handoff_task_counts(manifest) == (1, 1, 0)
+
+
+def test_qualification_diagnostic_rejects_inconsistent_handoff_counts() -> None:
+    manifest: dict[str, object] = {
+        "passed_task_count": 2,
+        "failed_task_count": 0,
+        "invalid_task_count": 0,
+        "tasks": [
+            {
+                "execution_status": "completed",
+                "reconstruction_status": "passed",
+            }
+        ],
+    }
+
+    with pytest.raises(ValidationError, match="counts are inconsistent"):
+        validated_handoff_task_counts(manifest)
 
 
 def test_refinement_tasks_preserve_guided_source_identity(tmp_path: Path) -> None:
@@ -853,6 +1065,94 @@ def test_refinement_cluster_support_is_config_driven() -> None:
     assert clusters[0].start_ids == ("start_a", "start_b")
 
 
+def _diagnostic_decoy(
+    *,
+    decoy_id: str,
+    seed: int,
+    start_id: str,
+    ranking_score: float,
+    x_offset: float,
+    native_rmsd_A: float,
+    chemistry_valid: bool = True,
+) -> DiagnosticDecoy:
+    return DiagnosticDecoy(
+        decoy_id=decoy_id,
+        description=decoy_id,
+        task_id=f"task_{decoy_id}",
+        start_id=start_id,
+        receptor_site_id="replaceable_site",
+        source_seed=1001,
+        refinement_seed=seed,
+        path=Path(f"{decoy_id}.pdb"),
+        sha256="0" * 64,
+        ranking_score=ranking_score,
+        chemistry_valid=chemistry_valid,
+        chemistry_failure=None if chemistry_valid else "invalid disulfide geometry",
+        receptor_alignment_rmsd_A=0.1,
+        native_backbone_rmsd_A=native_rmsd_A,
+        aligned_backbone=tuple(
+            gemmi.Position(index + x_offset, 0.0, 0.0) for index in range(6)
+        ),
+    )
+
+
+def test_qualification_diagnostic_clusters_only_chemistry_valid_decoys() -> None:
+    decoys = (
+        _diagnostic_decoy(
+            decoy_id="far_score_best",
+            seed=5101,
+            start_id="start_a",
+            ranking_score=-20.0,
+            x_offset=4.0,
+            native_rmsd_A=4.0,
+        ),
+        _diagnostic_decoy(
+            decoy_id="near_a",
+            seed=5101,
+            start_id="start_a",
+            ranking_score=-10.0,
+            x_offset=0.0,
+            native_rmsd_A=0.2,
+        ),
+        _diagnostic_decoy(
+            decoy_id="near_b",
+            seed=5103,
+            start_id="start_b",
+            ranking_score=-9.0,
+            x_offset=0.1,
+            native_rmsd_A=0.3,
+        ),
+        _diagnostic_decoy(
+            decoy_id="invalid_near",
+            seed=5105,
+            start_id="start_c",
+            ranking_score=-30.0,
+            x_offset=0.0,
+            native_rmsd_A=0.1,
+            chemistry_valid=False,
+        ),
+    )
+
+    clusters = cluster_diagnostic_decoys(
+        decoys=decoys,
+        cluster_threshold_A=0.5,
+        recovery_threshold_A=2.0,
+        min_seed_support=2,
+        min_start_support=2,
+    )
+
+    assert len(clusters) == 2
+    assert clusters[0].energy_representative_id == "far_score_best"
+    assert clusters[1].supported
+    assert clusters[1].recovered_seeds == (5101, 5103)
+    assert clusters[1].recovered_start_ids == ("start_a", "start_b")
+    assert all(
+        member.decoy_id != "invalid_near"
+        for cluster in clusters
+        for member in cluster.members
+    )
+
+
 def _reported_site(
     *, site_id: str, receptor_id: str, position: tuple[float, float, float]
 ) -> ReportedReceptorSite:
@@ -917,3 +1217,37 @@ def test_cross_state_comparison_uses_frozen_site_distance() -> None:
     assert comparisons[0].replication_state_ids == ("STATE_A",)
     assert comparisons[0].minimum_normalized_distance == pytest.approx(0.1)
     assert [site.site_id for site in replication_only] == ["STATE_ONLY"]
+
+
+def test_rosetta_crash_log_is_confined_and_renamed(tmp_path: Path) -> None:
+    crash_dir = rosetta_crash_log_dir(outputs_dir=tmp_path / "outputs")
+    log_path = tmp_path / "task" / "refine.log"
+    log_path.parent.mkdir()
+    with pytest.raises(ValidationError, match="crash report"):
+        run_rosetta_command(
+            command=(
+                "/bin/sh",
+                "-c",
+                "echo crash-dump > ROSETTA_CRASH.log; exit 1",
+            ),
+            log_path=log_path,
+            crash_dir=crash_dir,
+        )
+    assert not (crash_dir / "ROSETTA_CRASH.log").exists()
+    renamed = tuple(crash_dir.glob("*-refine-ROSETTA_CRASH.log"))
+    assert len(renamed) == 1
+    assert renamed[0].read_text(encoding="utf-8").strip() == "crash-dump"
+
+
+def test_rosetta_success_leaves_no_crash_log(tmp_path: Path) -> None:
+    crash_dir = tmp_path / "logs" / "rosetta_crashes"
+    log_path = tmp_path / "task" / "prepack.log"
+    log_path.parent.mkdir()
+    run_rosetta_command(
+        command=("/bin/sh", "-c", "exit 0"),
+        log_path=log_path,
+        crash_dir=crash_dir,
+    )
+    assert log_path.is_file()
+    assert not (crash_dir / "ROSETTA_CRASH.log").exists()
+    assert tuple(crash_dir.glob("*ROSETTA_CRASH.log")) == ()

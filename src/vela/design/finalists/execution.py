@@ -14,14 +14,18 @@ from vela.design.finalists.records import (
     read_finalist_plan,
 )
 from vela.design.models import DesignError, FinalistStart, FinalistTask
+from vela.design.scores import FINALIST_SCORE_COLUMNS, write_finalist_decoy_manifest
 from vela.preparation.chemistry import ChemistryDefinition, HistidineState
 from vela.validation.records import file_record, resume_completed_result
 from vela.validation.refinement.reconstruction import write_disulfide_indices
-from vela.validation.rosetta import build_refine_command, run_rosetta_command
+from vela.validation.rosetta import (
+    build_refine_command,
+    rosetta_crash_log_dir,
+    run_rosetta_command,
+)
 from vela.validation.scores import (
     index_rosetta_pdb_outputs,
     read_rosetta_scorefile,
-    write_refinement_decoy_manifest,
 )
 
 
@@ -76,7 +80,7 @@ def _run_task(
         directory=task_dir,
         filename="task_result.json",
         document_name="finalist task result",
-        schema="vela.design-finalist-task-result/1",
+        schema="vela.design-finalist-task-result/2",
         identity={"task_id": task.task_id, "pair_id": task.pair_id},
         plan_hash_key="finalist_plan_sha256",
         plan_hash=plan_sha256,
@@ -114,7 +118,12 @@ def _run_task(
     )
     log_path = task_dir / "refine.log"
     started_at = utc_now()
-    run_rosetta_command(command=command, log_path=log_path, thread_count=1)
+    run_rosetta_command(
+        command=command,
+        log_path=log_path,
+        crash_dir=rosetta_crash_log_dir(outputs_dir=config.paths.outputs_dir),
+        thread_count=1,
+    )
     score_path = task_dir / "refine.sc"
     rows = read_rosetta_scorefile(score_path)
     expected = config.validation.rosetta.decoys_per_seed
@@ -122,9 +131,8 @@ def _run_task(
         raise DesignError(
             f"{task.task_id} produced {len(rows)} decoys; expected {expected}"
         )
-    decoy_manifest = write_refinement_decoy_manifest(
+    decoy_manifest = write_finalist_decoy_manifest(
         rows=rows,
-        ranking_score=config.design.finalists.ranking_score,
         decoy_paths=index_rosetta_pdb_outputs(task_dir),
         task_dir=task_dir,
     )
@@ -132,7 +140,7 @@ def _run_task(
     atomic_write_json(
         result_path,
         {
-            "schema": "vela.design-finalist-task-result/1",
+            "schema": "vela.design-finalist-task-result/2",
             "status": "completed",
             "task_id": task.task_id,
             "pair_id": task.pair_id,
@@ -145,6 +153,8 @@ def _run_task(
             "finalist_plan_sha256": plan_sha256,
             "started_at": started_at,
             "completed_at": utc_now(),
+            "score_units": "Rosetta score units (REU) unless stated otherwise",
+            "score_columns": FINALIST_SCORE_COLUMNS,
             "command": list(command),
             "scorefile": file_record(score_path, root=task_dir),
             "decoy_manifest": file_record(decoy_manifest, root=task_dir),

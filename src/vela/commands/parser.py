@@ -220,6 +220,17 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Planned control directory below outputs/validation/controls.",
     )
+    validation_control_analyze = validation_commands.add_parser(
+        "control-analyze",
+        help="Analyze completed local-recovery tasks without overwriting prior reports.",
+    )
+    _add_config_argument(validation_control_analyze)
+    validation_control_analyze.add_argument(
+        "--run-dir",
+        type=Path,
+        required=True,
+        help="Completed control directory below outputs/validation/controls.",
+    )
     validation_replication_plan = validation_commands.add_parser(
         "replication-plan",
         help="Freeze stripped bound-state full-surface replication tasks.",
@@ -300,6 +311,79 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         help="Planned handoff directory below outputs/validation/handoffs.",
+    )
+    qualification_handoff_plan = validation_commands.add_parser(
+        "qualification-handoff-plan",
+        help="Freeze a development-only Top-B handoff from qualification evidence.",
+    )
+    _add_config_argument(qualification_handoff_plan)
+    qualification_handoff_plan.add_argument(
+        "--qualification-run",
+        type=Path,
+        required=True,
+        help="Analyzed directory below outputs/discovery/qualifications.",
+    )
+    qualification_handoff_plan.add_argument(
+        "--run-id", required=True, help="Unique identifier for the development run."
+    )
+    qualification_handoff_plan.add_argument(
+        "--site-budget",
+        type=int,
+        required=True,
+        help="Native-free Top-B supported-site budget to freeze.",
+    )
+    qualification_handoff_run = validation_commands.add_parser(
+        "qualification-handoff-run",
+        help="Execute or resume a frozen development-only all-atom handoff.",
+    )
+    _add_config_argument(qualification_handoff_run)
+    qualification_handoff_run.add_argument(
+        "--run-dir",
+        type=Path,
+        required=True,
+        help=("Planned directory below outputs/validation/qualification_handoffs."),
+    )
+    qualification_refinement_plan = validation_commands.add_parser(
+        "qualification-refinement-plan",
+        help="Freeze a native-aware Stage 2-to-3 recovery diagnostic.",
+    )
+    _add_config_argument(qualification_refinement_plan)
+    qualification_refinement_plan.add_argument(
+        "--source-run",
+        type=Path,
+        required=True,
+        help="Completed Top-B qualification handoff directory.",
+    )
+    qualification_refinement_plan.add_argument(
+        "--control-run",
+        type=Path,
+        required=True,
+        help="Completed chemistry-aware FlexPepDock control directory.",
+    )
+    qualification_refinement_plan.add_argument(
+        "--run-id", required=True, help="Unique identifier for the diagnostic run."
+    )
+    qualification_refinement_run = validation_commands.add_parser(
+        "qualification-refinement-run",
+        help="Execute or resume the frozen native-aware recovery diagnostic.",
+    )
+    _add_config_argument(qualification_refinement_run)
+    qualification_refinement_run.add_argument(
+        "--run-dir",
+        type=Path,
+        required=True,
+        help="Planned directory below outputs/validation/qualification_refinements.",
+    )
+    qualification_refinement_analyze = validation_commands.add_parser(
+        "qualification-refinement-analyze",
+        help="Analyze a completed native-aware refinement diagnostic.",
+    )
+    _add_config_argument(qualification_refinement_analyze)
+    qualification_refinement_analyze.add_argument(
+        "--run-dir",
+        type=Path,
+        required=True,
+        help="Completed directory below outputs/validation/qualification_refinements.",
     )
     validation_guided_plan = validation_commands.add_parser(
         "guided-plan",

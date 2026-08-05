@@ -710,17 +710,22 @@ def write_reference_receptor_complex(
     atomic_write_text(destination, records + output.make_pdb_string())
 
 
-def write_chemistry_protocol(
+def _write_chemistry_protocol(
     *,
     destination: Path,
     receptor_residue_count: int,
     chemistry: ChemistryDefinition,
     score_function: str,
+    flexpepdock_attributes: str | None,
 ) -> None:
-    """生成与当前配置肽端基合同一致的最小 RosettaScripts 协议。"""
-    if chemistry.n_terminus != "NH3+" or chemistry.c_terminus != "CONH2":
+    """生成端基、微状态、二硫键及可选同 Pose FlexPepDock 协议。"""
+    if chemistry.n_terminus not in {"NH3+", "Acetyl"}:
         raise ValidationError(
-            "all-atom handoff currently requires configured NH3+ and CONH2 termini"
+            "all-atom handoff supports configured NH3+ or Acetyl N termini"
+        )
+    if chemistry.c_terminus != "CONH2":
+        raise ValidationError(
+            "all-atom handoff currently requires a configured CONH2 C terminus"
         )
     if chemistry.other_modifications_status != "none":
         raise ValidationError(
@@ -731,6 +736,7 @@ def write_chemistry_protocol(
             "all-atom handoff currently supports configured HIE histidines only"
         )
     peptide_last_pose_index = receptor_residue_count + len(chemistry.sequence)
+    peptide_first_pose_index = receptor_residue_count + 1
     disulfides = ",".join(
         f"{receptor_residue_count + bond.first}:{receptor_residue_count + bond.second}"
         for bond in chemistry.disulfide_bonds
@@ -744,30 +750,141 @@ def write_chemistry_protocol(
     histidine_protocol = "\n".join(
         f'    <Add mover="set_hie_{item.position}" />' for item in chemistry.histidines
     )
+    n_terminus_selector = (
+        f'    <Index name="peptide_n_terminus" resnums="{peptide_first_pose_index}" />\n'
+        if chemistry.n_terminus == "Acetyl"
+        else ""
+    )
+    n_terminus_movers = (
+        '    <ModifyVariantType name="remove_n_terminal_charge" '
+        'remove_type="LOWER_TERMINUS_VARIANT" '
+        'residue_selector="peptide_n_terminus" '
+        'update_polymer_bond_dependent_atoms="true" />\n'
+        '    <ModifyVariantType name="add_n_terminal_acetyl" '
+        'add_type="N_ACETYLATION" residue_selector="peptide_n_terminus" '
+        'update_polymer_bond_dependent_atoms="true" />\n'
+        if chemistry.n_terminus == "Acetyl"
+        else ""
+    )
+    n_terminus_protocol = (
+        '    <Add mover="remove_n_terminal_charge" />\n'
+        '    <Add mover="add_n_terminal_acetyl" />\n'
+        if chemistry.n_terminus == "Acetyl"
+        else ""
+    )
+    flexpepdock_mover = (
+        f'    <FlexPepDock name="run_flexpepdock" {flexpepdock_attributes} />\n'
+        if flexpepdock_attributes is not None
+        else ""
+    )
+    flexpepdock_protocol = (
+        '    <Add mover="run_flexpepdock" />\n'
+        if flexpepdock_attributes is not None
+        else ""
+    )
     protocol = f"""<ROSETTASCRIPTS>
   <SCOREFXNS>
     <ScoreFunction name="handoff_score" weights="{score_function}" />
   </SCOREFXNS>
   <RESIDUE_SELECTORS>
-    <Index name="peptide_c_terminus" resnums="{peptide_last_pose_index}" />
+{n_terminus_selector}    <Index name="peptide_c_terminus" resnums="{peptide_last_pose_index}" />
   </RESIDUE_SELECTORS>
   <MOVERS>
 {histidine_movers}
-    <ForceDisulfides name="form_disulfides" scorefxn="handoff_score"
+{n_terminus_movers}    <ForceDisulfides name="form_disulfides" scorefxn="handoff_score"
       disulfides="{disulfides}" remove_existing="false" repack="true" />
     <ModifyVariantType name="add_c_terminal_amide"
       add_type="CTERM_AMIDATION"
       residue_selector="peptide_c_terminus" />
-  </MOVERS>
+{flexpepdock_mover}  </MOVERS>
   <PROTOCOLS>
-    <Add mover="form_disulfides" />
-{histidine_protocol}
+{n_terminus_protocol}{histidine_protocol}
     <Add mover="add_c_terminal_amide" />
-  </PROTOCOLS>
+    <Add mover="form_disulfides" />
+{flexpepdock_protocol}  </PROTOCOLS>
   <OUTPUT scorefxn="handoff_score" />
 </ROSETTASCRIPTS>
 """
     atomic_write_text(destination, protocol)
+
+
+def write_chemistry_protocol(
+    *,
+    destination: Path,
+    receptor_residue_count: int,
+    chemistry: ChemistryDefinition,
+    score_function: str,
+) -> None:
+    """生成只恢复声明化学身份、不执行局部 pose 搜索的协议。"""
+    _write_chemistry_protocol(
+        destination=destination,
+        receptor_residue_count=receptor_residue_count,
+        chemistry=chemistry,
+        score_function=score_function,
+        flexpepdock_attributes=None,
+    )
+
+
+def write_chemistry_prepack_protocol(
+    *,
+    destination: Path,
+    receptor_residue_count: int,
+    chemistry: ChemistryDefinition,
+    score_function: str,
+) -> None:
+    """在同一个 Rosetta Pose 内恢复化学身份并执行 FlexPepDock prepack。"""
+    _write_chemistry_protocol(
+        destination=destination,
+        receptor_residue_count=receptor_residue_count,
+        chemistry=chemistry,
+        score_function=score_function,
+        flexpepdock_attributes='ppk_only="true" recal_foldtree="true"',
+    )
+
+
+def write_chemistry_refine_protocol(
+    *,
+    destination: Path,
+    receptor_residue_count: int,
+    chemistry: ChemistryDefinition,
+    score_function: str,
+) -> None:
+    """在同一个 Rosetta Pose 内恢复化学身份并执行局部精修。"""
+    _write_chemistry_protocol(
+        destination=destination,
+        receptor_residue_count=receptor_residue_count,
+        chemistry=chemistry,
+        score_function=score_function,
+        flexpepdock_attributes='pep_refine="true" recal_foldtree="true"',
+    )
+
+
+def write_chemistry_production_refine_protocol(
+    *,
+    destination: Path,
+    receptor_residue_count: int,
+    chemistry: ChemistryDefinition,
+    score_function: str,
+    random_translation_A: float,
+    random_rotation_degrees: float,
+    lowres_preoptimize: bool,
+) -> None:
+    """生成保持完整化学身份的正式 FlexPepDock 局部精修协议。"""
+    if random_translation_A < 0 or random_rotation_degrees < 0:
+        raise ValidationError("FlexPepDock initial perturbations must not be negative")
+    attributes = (
+        'pep_refine="true" recal_foldtree="true" '
+        f'lowres_preoptimize="{str(lowres_preoptimize).lower()}" '
+        f'rb_trans_size="{random_translation_A}" '
+        f'rb_rot_size="{random_rotation_degrees}"'
+    )
+    _write_chemistry_protocol(
+        destination=destination,
+        receptor_residue_count=receptor_residue_count,
+        chemistry=chemistry,
+        score_function=score_function,
+        flexpepdock_attributes=attributes,
+    )
 
 
 def write_topology_rebuild_protocol(
@@ -854,8 +971,18 @@ def validate_flexpepdock_input(
                 )
     first = peptide[0]
     last = peptide[-1]
-    if any(_named_atom(first, name) is None for name in ("1H", "2H", "3H")):
-        raise ValidationError("configured peptide N terminus is not Rosetta NH3+")
+    if chemistry.n_terminus == "NH3+":
+        if any(_named_atom(first, name) is None for name in ("1H", "2H", "3H")):
+            raise ValidationError("configured peptide N terminus is not Rosetta NH3+")
+    elif chemistry.n_terminus == "Acetyl":
+        if any(_named_atom(first, name) is None for name in ("CP", "OCP")) or any(
+            _named_atom(first, name) is not None for name in ("1H", "2H", "3H")
+        ):
+            raise ValidationError(
+                "configured peptide N terminus is not Rosetta N-acetylated"
+            )
+    else:
+        raise ValidationError("configured peptide N terminus is unsupported")
     if _named_atom(last, "NT") is None or _named_atom(last, "OXT") is not None:
         raise ValidationError("configured peptide C terminus is not Rosetta CONH2")
     histidine_by_position = {item.position: item.state for item in chemistry.histidines}

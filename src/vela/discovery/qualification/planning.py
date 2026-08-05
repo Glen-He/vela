@@ -13,6 +13,7 @@ from vela.core.provenance import (
     atomic_write_json,
     atomic_write_text,
     is_current_vela_software,
+    is_vela_software_identity,
     sha256_file,
     utc_now,
     vela_software_identity,
@@ -203,7 +204,7 @@ def _shared_control_record(
         plan_value: object = json.loads(
             paths["qualification_plan"].read_text(encoding="utf-8")
         )
-        plan = object_mapping(plan_value, name="shared qualification plan")
+        object_mapping(plan_value, name="shared qualification plan")
         report_value: object = json.loads(
             paths["qualification_report"].read_text(encoding="utf-8")
         )
@@ -220,7 +221,7 @@ def _shared_control_record(
         report.get("schema") != REPORT_SCHEMA
         or report.get("status") != "qualified"
         or selection.get("passed") is not True
-        or not is_current_vela_software(plan.get("software"))
+        or not is_current_vela_software(report.get("analysis_software"))
     ):
         raise DiscoveryError("shared qualification control did not pass")
     return {
@@ -347,8 +348,8 @@ def topology_calibration_record(config: AppConfig) -> dict[str, JsonValue]:
         ):
             raise DiscoveryError(f"topology calibration {key} has changed")
     plan = _document_record(resolved_report.parent / PLAN_NAME)
-    if not is_current_vela_software(plan.get("software")):
-        raise DiscoveryError("topology calibration used a different Vela source tree")
+    if not is_vela_software_identity(plan.get("software")):
+        raise DiscoveryError("topology calibration software identity is invalid")
     return {
         "status": qualification.topology_calibration_status,
         "report": {"path": report.as_posix(), "sha256": digest},

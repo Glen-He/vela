@@ -82,20 +82,12 @@ class InterfaceScreenSettings:
 
 @dataclass(frozen=True, slots=True)
 class CombinationSettings:
-    """由单点证据提出有限多突变组合的资源边界。"""
+    """由单点证据提出双突变组合的资源边界。"""
 
-    min_mutations: int
-    max_mutations: int
     max_options_per_position: int
     max_candidates: int
 
     def __post_init__(self) -> None:
-        if self.min_mutations < 2:
-            raise DesignError("combination min_mutations must be at least 2")
-        if self.max_mutations < self.min_mutations:
-            raise DesignError(
-                "combination max_mutations must not be below min_mutations"
-            )
         if self.max_options_per_position < 1 or self.max_candidates < 1:
             raise DesignError("combination resource limits must be positive")
 
@@ -124,16 +116,22 @@ class DesignAnalysisSettings:
     """必须通过独立校准冻结的候选判断门槛。"""
 
     calibrated: bool
-    max_positive_median_delta: float | None
-    max_positive_worst_delta: float | None
+    max_median_paired_dG_separated_delta_REU: float | None
+    min_favorable_seed_fraction: float | None
+
+    def __post_init__(self) -> None:
+        if self.min_favorable_seed_fraction is not None and not (
+            0.0 <= self.min_favorable_seed_fraction <= 1.0
+        ):
+            raise DesignError("min_favorable_seed_fraction must be in [0, 1]")
 
     @property
     def complete(self) -> bool:
         """返回门槛是否足以形成正式候选判定。"""
         return (
             self.calibrated
-            and self.max_positive_median_delta is not None
-            and self.max_positive_worst_delta is not None
+            and self.max_median_paired_dG_separated_delta_REU is not None
+            and self.min_favorable_seed_fraction is not None
         )
 
 
@@ -143,6 +141,7 @@ class FinalistSettings:
 
     parallel_tasks: int
     max_candidates: int
+    max_flexibility_required_candidates: int
     max_md_candidates: int
     seeds: tuple[int, ...]
     ranking_score: str
@@ -151,15 +150,21 @@ class FinalistSettings:
     min_passed_decoy_fraction: float | None
     min_successful_seeds: int | None
     max_positive_median_ranking_delta: float | None
-    max_positive_worst_ranking_delta: float | None
     max_positive_median_interface_delta: float | None
-    max_positive_worst_interface_delta: float | None
 
     def __post_init__(self) -> None:
         if self.parallel_tasks < 1:
             raise DesignError("design finalist parallel_tasks must be positive")
-        if self.max_candidates < 1 or self.max_md_candidates < 1:
+        if (
+            self.max_candidates < 1
+            or self.max_flexibility_required_candidates < 0
+            or self.max_md_candidates < 1
+        ):
             raise DesignError("design finalist resource limits must be positive")
+        if self.max_flexibility_required_candidates > self.max_candidates:
+            raise DesignError(
+                "max_flexibility_required_candidates exceeds max_candidates"
+            )
         if self.max_md_candidates > self.max_candidates:
             raise DesignError(
                 "design finalist max_md_candidates must not exceed max_candidates"
@@ -203,9 +208,7 @@ class FinalistSettings:
             and self.min_passed_decoy_fraction is not None
             and self.min_successful_seeds is not None
             and self.max_positive_median_ranking_delta is not None
-            and self.max_positive_worst_ranking_delta is not None
             and self.max_positive_median_interface_delta is not None
-            and self.max_positive_worst_interface_delta is not None
         )
 
 
@@ -259,7 +262,7 @@ class DesignSettings:
             raise DesignError(
                 "resolved design qualification requires a report and SHA-256"
             )
-        if self.iteration.max_total_mutations < self.combination.max_mutations:
+        if self.iteration.max_total_mutations < 2:
             raise DesignError(
                 "iteration max_total_mutations must cover first-generation combinations"
             )
@@ -417,6 +420,7 @@ class ScreenTask:
     seed: int
     resfile_path: Path
     resfile_sha256: str
+    wt_context_id: str | None
 
     def __post_init__(self) -> None:
         if not RUN_ID_PATTERN.fullmatch(self.task_id) or not RUN_ID_PATTERN.fullmatch(
@@ -425,6 +429,12 @@ class ScreenTask:
             raise DesignError("screen task identifiers are invalid")
         if self.state not in {"wt", "mutant"}:
             raise DesignError("screen task state must be wt or mutant")
+        if (self.state == "wt") != (self.wt_context_id is not None):
+            raise DesignError("only WT screen tasks must declare wt_context_id")
+        if self.wt_context_id is not None and not RUN_ID_PATTERN.fullmatch(
+            self.wt_context_id
+        ):
+            raise DesignError("screen WT context ID is invalid")
         if self.seed < 0:
             raise DesignError("screen task seed must not be negative")
         if not SHA256_PATTERN.fullmatch(self.resfile_sha256):

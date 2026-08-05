@@ -14,6 +14,7 @@ from vela.core.provenance import (
     sha256_file,
     utc_now,
 )
+from vela.preparation.chemistry import ChemistryDefinition, HistidineState
 from vela.preparation.receptors.cleaning.conformers import (
     resolve_alternate_conformation,
 )
@@ -26,6 +27,38 @@ from vela.validation.models import (
 
 RECEPTOR_CHAIN = "A"
 PEPTIDE_CHAIN = "P"
+
+
+def standard_peptide_chemistry(
+    definition: BoundStateDefinition,
+) -> ChemistryDefinition:
+    """把已解析的标准肽结合态转换为唯一的计算化学定义。"""
+    sequence = definition.ligand_sequence
+    if (
+        sequence is None
+        or definition.ligand_n_terminus is None
+        or definition.ligand_c_terminus is None
+    ):
+        raise ValidationError(
+            f"bound-state ligand chemistry is unresolved: {definition.state_id}"
+        )
+    return ChemistryDefinition(
+        ligand_id=definition.ligand_id.lower(),
+        chemistry_id=f"qualification-{definition.state_id}",
+        sequence=sequence,
+        chirality="L",
+        disulfide_bonds=definition.disulfide_bonds,
+        n_terminus=definition.ligand_n_terminus,
+        c_terminus=definition.ligand_c_terminus,
+        target_ph=None,
+        net_charge=None,
+        histidines=tuple(
+            HistidineState(item.position, item.state) for item in definition.histidines
+        ),
+        other_modifications_status="none",
+        other_modifications=(),
+        decision_sources=(f"bound_state:{definition.state_id}",),
+    )
 
 
 @dataclass(frozen=True, slots=True)

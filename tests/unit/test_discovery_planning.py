@@ -12,6 +12,7 @@ from vela.core.provenance import (
     atomic_write_json,
     atomic_write_text,
     sha256_file,
+    vela_software_identity,
 )
 from vela.core.typed_data import object_mapping
 from vela.discovery.models import (
@@ -339,9 +340,10 @@ def _ready_config(tmp_path: Path) -> AppConfig:
         atomic_write_json(
             report_path,
             {
-                "schema": "vela.discovery-qualification-report/7",
+                "schema": "vela.discovery-qualification-report/8",
                 "status": "qualified",
                 "target_id": target_id,
+                "analysis_software": vela_software_identity(),
                 "recommended_target_config": {
                     "qualification_status": "qualified",
                     "contact_jaccard_distance": 0.5,
@@ -553,6 +555,52 @@ def test_ready_target_expands_its_receptors_by_independent_seed(
     )
 
 
+def test_unqualified_report_is_valid_but_does_not_authorize_production(
+    tmp_path: Path,
+) -> None:
+    config = _ready_config(tmp_path)
+    target = config.discovery.target("ck2_alpha")
+    assert target.qualification_report is not None
+    atomic_write_json(
+        target.qualification_report,
+        {
+            "schema": "vela.discovery-qualification-report/8",
+            "status": "unqualified",
+            "target_id": target.target_id,
+            "analysis_software": vela_software_identity(),
+            "recommended_target_config": None,
+        },
+    )
+    unqualified_target = replace(
+        target,
+        qualification_status="unqualified",
+        qualification_report_sha256=sha256_file(target.qualification_report),
+    )
+    settings = replace(
+        config.discovery,
+        targets=tuple(
+            unqualified_target if item.target_id == target.target_id else item
+            for item in config.discovery.targets
+        ),
+    )
+
+    readiness = assess_discovery_readiness(
+        target_id="ck2_alpha",
+        chemistry=config.chemistry,
+        settings=settings,
+        receptors=config.receptors,
+        audit=config.audit,
+        preparation=config.preparation,
+        data_dir=config.paths.data_dir,
+    )
+
+    codes = {issue.code for issue in readiness.issues}
+    assert not readiness.ready
+    assert "method_not_qualified" in codes
+    assert "qualification_report_invalid" not in codes
+    assert "qualification_report_mismatch" not in codes
+
+
 def test_stage_one_readiness_is_independent_of_discovery_method(
     tmp_path: Path,
 ) -> None:
@@ -713,6 +761,8 @@ def _replication_config(config: AppConfig) -> AppConfig:
         ligand_author_chain_id="L",
         local_control_kind="standard_cyclic_peptide",
         ligand_sequence="CAC",
+        ligand_n_terminus="NH3+",
+        ligand_c_terminus="CONH2",
         disulfide_bonds=(DisulfideBond(1, 3),),
         histidines=(),
         selection_reason="Synthetic replaceable validation state.",

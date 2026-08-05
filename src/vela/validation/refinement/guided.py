@@ -35,6 +35,7 @@ from vela.validation.refinement.reconstruction import (
 )
 from vela.validation.rosetta import (
     build_chemistry_command,
+    rosetta_crash_log_dir,
     run_rosetta_command,
     single_rosetta_pdb_output,
     verify_rosetta_scripts_tool,
@@ -340,9 +341,16 @@ def _run_task(
         disulfide_path=disulfide,
         output_dir=chemistry_dir,
         seed=config.validation.handoff.chemistry_seed,
+        fixed_histidine_pose_indices=tuple(
+            receptor_count + item.position for item in config.chemistry.histidines
+        ),
     )
     log = task_dir / "restore_chemistry.log"
-    run_rosetta_command(command=command, log_path=log)
+    run_rosetta_command(
+        command=command,
+        log_path=log,
+        crash_dir=rosetta_crash_log_dir(outputs_dir=config.paths.outputs_dir),
+    )
     read_rosetta_scorefile(chemistry_dir / "chemistry.sc")
     source_output = single_rosetta_pdb_output(chemistry_dir)
     output = task_dir / "flexpepdock_input.pdb"

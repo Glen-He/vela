@@ -62,34 +62,20 @@ from vela.discovery.sampling.trajectory import (
 )
 from vela.validation.models import ValidationError
 from vela.validation.records import file_record, validate_record
-from vela.validation.refinement.reconstruction import (
-    assess_topology_reconstruction,
-    build_cg2all_command,
-    verify_cg2all_tool,
-    write_cg2all_input,
-    write_disulfide_indices,
-    write_peptide_site_coordinate_constraints,
-    write_reference_receptor_complex,
-    write_topology_rebuild_protocol,
-)
+from vela.validation.refinement.reconstruction import verify_cg2all_tool
+from vela.validation.refinement.topology_recovery import recover_topology
 from vela.validation.rosetta import (
-    build_chemistry_command,
-    build_prepack_command,
-    build_topology_refine_command,
-    run_rosetta_command,
-    single_rosetta_pdb_output,
     verify_flexpepdock_tool,
     verify_rosetta_scripts_tool,
 )
-from vela.validation.scores import read_rosetta_scorefile
 
 PLAN_NAME = "topology_calibration_plan.json"
 MANIFEST_NAME = "topology_calibration_manifest.json"
 REPORT_NAME = "topology_calibration_report.json"
-PLAN_SCHEMA = "vela.disulfide-topology-calibration-plan/5"
-TASK_SCHEMA = "vela.disulfide-topology-calibration-task-result/5"
-MANIFEST_SCHEMA = "vela.disulfide-topology-calibration-manifest/5"
-REPORT_SCHEMA = "vela.disulfide-topology-calibration-report/5"
+PLAN_SCHEMA = "vela.disulfide-topology-calibration-plan/6"
+TASK_SCHEMA = "vela.disulfide-topology-calibration-task-result/6"
+MANIFEST_SCHEMA = "vela.disulfide-topology-calibration-manifest/6"
+REPORT_SCHEMA = "vela.disulfide-topology-calibration-report/6"
 
 
 @dataclass(frozen=True, slots=True)
@@ -835,6 +821,7 @@ def _write_task_result(
     task_id: str,
     plan_sha256: str,
     started_at: str,
+    execution_status: str,
     reconstruction_status: str,
     failure_reasons: tuple[str, ...],
     failure_detail: str | None,
@@ -852,6 +839,7 @@ def _write_task_result(
             "topology_calibration_plan_sha256": plan_sha256,
             "started_at": started_at,
             "completed_at": utc_now(),
+            "execution_status": execution_status,
             "reconstruction_status": reconstruction_status,
             "failure_reasons": list(failure_reasons),
             "failure_detail": failure_detail,
@@ -904,313 +892,27 @@ def _run_task(
     state = control_bound_state(config)
     chemistry = control_chemistry(state)
     started_at = utc_now()
-    artifacts: dict[str, JsonValue] = {}
-    commands: dict[str, JsonValue] = {}
-    cg_input_path = task_dir / "cg2all_input.pdb"
-    cg_input = write_cg2all_input(
+    recovery = recover_topology(
+        config=config,
         source_path=source_path,
         model_index=model_index,
-        destination=cg_input_path,
+        reference_receptor_path=reference_receptor_path,
         chemistry=chemistry,
-        settings=config.validation.cg2all,
+        task_dir=task_dir,
+        rosetta_seed=rosetta_seed,
     )
-    artifacts["cg2all_input"] = file_record(cg_input_path, root=task_dir)
-    cg_output_path = task_dir / "cg2all_raw.pdb"
-    cg_command = build_cg2all_command(
-        settings=config.validation.cg2all,
-        input_path=cg_input_path,
-        output_path=cg_output_path,
-    )
-    commands["cg2all"] = list(cg_command)
-    cg_log_path = task_dir / "cg2all.log"
-    try:
-        run_rosetta_command(
-            command=cg_command,
-            log_path=cg_log_path,
-            thread_count=config.validation.cg2all.processes,
-        )
-    except ValidationError as exc:
-        artifacts["cg2all_log"] = file_record(cg_log_path, root=task_dir)
-        return _write_task_result(
-            task_dir=task_dir,
-            task_id=task_id,
-            plan_sha256=plan_sha256,
-            started_at=started_at,
-            reconstruction_status="failed",
-            failure_reasons=("cg2all_reconstruction_failed",),
-            failure_detail=str(exc),
-            metrics=None,
-            commands=commands,
-            artifacts=artifacts,
-        )
-    artifacts["cg2all_log"] = file_record(cg_log_path, root=task_dir)
-    artifacts["cg2all_raw"] = file_record(cg_output_path, root=task_dir)
-    grafted_path = task_dir / "all_atom_reference_receptor.pdb"
-    try:
-        write_reference_receptor_complex(
-            coarse_pose_path=cg_input_path,
-            reconstructed_path=cg_output_path,
-            reference_receptor_path=reference_receptor_path,
-            destination=grafted_path,
-            chemistry=chemistry,
-        )
-    except ValidationError as exc:
-        return _write_task_result(
-            task_dir=task_dir,
-            task_id=task_id,
-            plan_sha256=plan_sha256,
-            started_at=started_at,
-            reconstruction_status="failed",
-            failure_reasons=("cg2all_output_invalid",),
-            failure_detail=str(exc),
-            metrics=None,
-            commands=commands,
-            artifacts=artifacts,
-        )
-    artifacts["all_atom_reference_receptor"] = file_record(grafted_path, root=task_dir)
-    disulfide_path = task_dir / "fix_disulfide.txt"
-    write_disulfide_indices(
-        destination=disulfide_path,
-        receptor_residue_count=cg_input.receptor_residue_count,
-        chemistry=chemistry,
-    )
-    artifacts["fix_disulfide"] = file_record(disulfide_path, root=task_dir)
-    topology_protocol_path = task_dir / "rebuild_topology.xml"
-    write_topology_rebuild_protocol(
-        destination=topology_protocol_path,
-        receptor_residue_count=cg_input.receptor_residue_count,
-        chemistry=chemistry,
-        score_function=config.validation.rosetta.score_function,
-    )
-    artifacts["topology_rebuild_protocol"] = file_record(
-        topology_protocol_path, root=task_dir
-    )
-    rebuild_dir = task_dir / "topology_rebuild"
-    rebuild_dir.mkdir()
-    rebuild_command = build_chemistry_command(
-        settings=config.validation.rosetta,
-        input_path=grafted_path,
-        protocol_path=topology_protocol_path,
-        disulfide_path=disulfide_path,
-        output_dir=rebuild_dir,
-        seed=rosetta_seed,
-    )
-    commands["disulfide_rebuild"] = list(rebuild_command)
-    rebuild_log_path = task_dir / "disulfide_rebuild.log"
-    try:
-        run_rosetta_command(command=rebuild_command, log_path=rebuild_log_path)
-        rebuild_scores = read_rosetta_scorefile(rebuild_dir / "chemistry.sc")
-        if len(rebuild_scores) != 1:
-            raise ValidationError(
-                "disulfide rebuild must produce exactly one score row"
-            )
-        rebuilt_output = single_rosetta_pdb_output(rebuild_dir)
-    except ValidationError as exc:
-        artifacts["disulfide_rebuild_log"] = file_record(
-            rebuild_log_path, root=task_dir
-        )
-        return _write_task_result(
-            task_dir=task_dir,
-            task_id=task_id,
-            plan_sha256=plan_sha256,
-            started_at=started_at,
-            reconstruction_status="failed",
-            failure_reasons=("rosetta_disulfide_rebuild_failed",),
-            failure_detail=str(exc),
-            metrics=None,
-            commands=commands,
-            artifacts=artifacts,
-        )
-    artifacts["disulfide_rebuild_log"] = file_record(rebuild_log_path, root=task_dir)
-    rebuilt_path = task_dir / "all_atom_disulfide_rebuilt.pdb"
-    atomic_write_text(rebuilt_path, rebuilt_output.read_text(encoding="utf-8"))
-    artifacts["all_atom_disulfide_rebuilt"] = file_record(rebuilt_path, root=task_dir)
-    prepack_dir = task_dir / "prepack"
-    prepack_dir.mkdir()
-    prepack_command = build_prepack_command(
-        settings=config.validation.rosetta,
-        input_path=rebuilt_path,
-        disulfide_path=disulfide_path,
-        output_dir=prepack_dir,
-        seed=rosetta_seed,
-        fixed_histidine_pose_indices=cg_input.fixed_histidine_pose_indices,
-    )
-    commands["disulfide_prepack"] = list(prepack_command)
-    prepack_log_path = task_dir / "disulfide_prepack.log"
-    try:
-        run_rosetta_command(command=prepack_command, log_path=prepack_log_path)
-        prepack_scores = read_rosetta_scorefile(prepack_dir / "prepack.sc")
-        if len(prepack_scores) != 1:
-            raise ValidationError(
-                "disulfide prepack must produce exactly one score row"
-            )
-        rosetta_output = single_rosetta_pdb_output(prepack_dir)
-    except ValidationError as exc:
-        artifacts["disulfide_prepack_log"] = file_record(
-            prepack_log_path, root=task_dir
-        )
-        return _write_task_result(
-            task_dir=task_dir,
-            task_id=task_id,
-            plan_sha256=plan_sha256,
-            started_at=started_at,
-            reconstruction_status="failed",
-            failure_reasons=("rosetta_disulfide_prepack_failed",),
-            failure_detail=str(exc),
-            metrics=None,
-            commands=commands,
-            artifacts=artifacts,
-        )
-    artifacts["disulfide_prepack_log"] = file_record(prepack_log_path, root=task_dir)
-    prepacked_path = task_dir / "all_atom_prepacked.pdb"
-    atomic_write_text(prepacked_path, rosetta_output.read_text(encoding="utf-8"))
-    artifacts["all_atom_prepacked"] = file_record(prepacked_path, root=task_dir)
-    site_constraint_path = task_dir / "site_coordinate_constraints.cst"
-    constraint_count = write_peptide_site_coordinate_constraints(
-        source_path=prepacked_path,
-        destination=site_constraint_path,
-        chemistry=chemistry,
-        flat_width_A=(
-            config.discovery.qualification.topology_calibration.site_coordinate_constraint_flat_width_A
-        ),
-        standard_deviation_A=(
-            config.discovery.qualification.topology_calibration.site_coordinate_constraint_sd_A
-        ),
-    )
-    if constraint_count != len(chemistry.sequence):
-        raise DiscoveryError("topology refine site constraint count is invalid")
-    artifacts["site_coordinate_constraints"] = file_record(
-        site_constraint_path, root=task_dir
-    )
-    refine_dir = task_dir / "topology_refine"
-    refine_dir.mkdir()
-    refine_command = build_topology_refine_command(
-        settings=config.validation.rosetta,
-        input_path=prepacked_path,
-        disulfide_path=disulfide_path,
-        output_dir=refine_dir,
-        seed=rosetta_seed,
-        site_constraint_path=site_constraint_path,
-        site_constraint_weight=(
-            config.discovery.qualification.topology_calibration.site_coordinate_constraint_weight
-        ),
-        fixed_histidine_pose_indices=cg_input.fixed_histidine_pose_indices,
-    )
-    commands["topology_refine"] = list(refine_command)
-    refine_log_path = task_dir / "topology_refine.log"
-    try:
-        run_rosetta_command(command=refine_command, log_path=refine_log_path)
-        refine_scores = read_rosetta_scorefile(refine_dir / "refine.sc")
-        if len(refine_scores) != 1:
-            raise ValidationError("topology refine must produce exactly one score row")
-        refined_output = single_rosetta_pdb_output(refine_dir)
-    except ValidationError as exc:
-        artifacts["topology_refine_log"] = file_record(refine_log_path, root=task_dir)
-        return _write_task_result(
-            task_dir=task_dir,
-            task_id=task_id,
-            plan_sha256=plan_sha256,
-            started_at=started_at,
-            reconstruction_status="failed",
-            failure_reasons=("flexpepdock_topology_refine_failed",),
-            failure_detail=str(exc),
-            metrics=None,
-            commands=commands,
-            artifacts=artifacts,
-        )
-    artifacts["topology_refine_log"] = file_record(refine_log_path, root=task_dir)
-    final_path = task_dir / "all_atom_topology.pdb"
-    atomic_write_text(final_path, refined_output.read_text(encoding="utf-8"))
-    artifacts["all_atom_topology"] = file_record(final_path, root=task_dir)
-    try:
-        assessment = assess_topology_reconstruction(
-            input_path=cg_input_path,
-            output_path=final_path,
-            chemistry=chemistry,
-            settings=config.validation.cg2all,
-            min_disulfide_sg_A=config.validation.min_disulfide_sg_A,
-            max_disulfide_sg_A=config.validation.max_disulfide_sg_A,
-            min_interchain_heavy_atom_distance_A=(
-                config.discovery.qualification.topology_calibration.min_interchain_heavy_atom_distance_A
-            ),
-            min_nonlocal_peptide_heavy_atom_distance_A=(
-                config.discovery.qualification.topology_calibration.min_nonlocal_peptide_heavy_atom_distance_A
-            ),
-            contact_ca_threshold_A=(
-                config.discovery.qualification.topology_calibration.contact_ca_threshold_A
-            ),
-            max_peptide_internal_ca_rmsd_A=(
-                config.discovery.qualification.topology_calibration.max_peptide_internal_ca_rmsd_A
-            ),
-            max_ligand_centroid_displacement_A=(
-                config.discovery.qualification.topology_calibration.max_ligand_centroid_displacement_A
-            ),
-            min_receptor_contact_retention_fraction=(
-                config.discovery.qualification.topology_calibration.min_receptor_contact_retention_fraction
-            ),
-        )
-    except ValidationError as exc:
-        return _write_task_result(
-            task_dir=task_dir,
-            task_id=task_id,
-            plan_sha256=plan_sha256,
-            started_at=started_at,
-            reconstruction_status="failed",
-            failure_reasons=("all_atom_output_invalid",),
-            failure_detail=str(exc),
-            metrics=None,
-            commands=commands,
-            artifacts=artifacts,
-        )
-    refine_fa_rep = refine_scores[0].score("fa_rep")
-    refine_backbone_strain = max(refine_scores[0].score("omega"), 0.0) + max(
-        refine_scores[0].score("rama_prepro"), 0.0
-    )
-    failures = assessment.failures
-    metrics: dict[str, JsonValue] = {
-        "receptor_ca_rmsd_A": round(assessment.receptor_ca_rmsd_A, 6),
-        "peptide_pose_ca_rmsd_A": round(assessment.peptide_pose_ca_rmsd_A, 6),
-        "peptide_internal_ca_rmsd_A": round(assessment.peptide_internal_ca_rmsd_A, 6),
-        "ligand_centroid_displacement_A": round(
-            assessment.ligand_centroid_displacement_A, 6
-        ),
-        "receptor_contact_retention_fraction": round(
-            assessment.receptor_contact_retention_fraction, 6
-        ),
-        "disulfide_sg_distances_A": [
-            round(value, 6) for value in assessment.disulfide_sg_distances_A
-        ],
-        "min_interchain_heavy_atom_distance_A": round(
-            assessment.min_interchain_heavy_atom_distance_A, 6
-        ),
-        "min_nonlocal_peptide_heavy_atom_distance_A": round(
-            assessment.min_nonlocal_peptide_heavy_atom_distance_A, 6
-        ),
-        "rosetta_scores": {
-            "rebuild_total_score": rebuild_scores[0].score("total_score"),
-            "rebuild_dslf_fa13": rebuild_scores[0].score("dslf_fa13"),
-            "prepack_total_score": prepack_scores[0].score("total_score"),
-            "prepack_dslf_fa13": prepack_scores[0].score("dslf_fa13"),
-            "prepack_fa_rep": prepack_scores[0].score("fa_rep"),
-            "refine_total_score": refine_scores[0].score("total_score"),
-            "refine_dslf_fa13": refine_scores[0].score("dslf_fa13"),
-            "refine_fa_rep": refine_fa_rep,
-            "refine_omega": refine_scores[0].score("omega"),
-            "refine_rama_prepro": refine_scores[0].score("rama_prepro"),
-            "refine_positive_backbone_strain": refine_backbone_strain,
-        },
-    }
     return _write_task_result(
         task_dir=task_dir,
         task_id=task_id,
         plan_sha256=plan_sha256,
         started_at=started_at,
-        reconstruction_status=("passed" if not failures else "failed"),
-        failure_reasons=failures,
-        failure_detail=None,
-        metrics=metrics,
-        commands=commands,
-        artifacts=artifacts,
+        execution_status=recovery.execution_status,
+        reconstruction_status=recovery.reconstruction_status,
+        failure_reasons=recovery.failure_reasons,
+        failure_detail=recovery.failure_detail,
+        metrics=recovery.metrics,
+        commands=recovery.commands,
+        artifacts=recovery.artifacts,
     )
 
 
@@ -1318,12 +1020,22 @@ def run_topology_calibration(*, config: AppConfig, run_dir: Path) -> Path:
             for task in tasks
         )
         results = tuple(future.result() for future in futures)
+    result_documents = tuple(
+        _document(path, name="topology calibration task result") for path in results
+    )
     atomic_write_json(
         manifest_path,
         {
             "schema": MANIFEST_SCHEMA,
             "stage": "disulfide_topology_calibration",
-            "status": "completed",
+            "status": (
+                "invalid"
+                if any(
+                    result.get("execution_status") == "invalid"
+                    for result in result_documents
+                )
+                else "completed"
+            ),
             "completed_at": utc_now(),
             "topology_calibration_plan": {
                 "path": PLAN_NAME,
@@ -1332,6 +1044,10 @@ def run_topology_calibration(*, config: AppConfig, run_dir: Path) -> Path:
             "execution": {
                 "parallel_tasks": worker_count,
                 "task_count": len(results),
+                "invalid_task_count": sum(
+                    result.get("execution_status") == "invalid"
+                    for result in result_documents
+                ),
             },
             "task_results": [file_record(path, root=run_dir) for path in results],
         },

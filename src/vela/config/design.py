@@ -96,8 +96,6 @@ def parse_design(source: Mapping[str, object], *, config_dir: Path) -> DesignSet
 
     combination = table(section, "combination", path="design")
     combination_keys = {
-        "min_mutations",
-        "max_mutations",
         "max_options_per_position",
         "max_candidates",
     }
@@ -124,8 +122,8 @@ def parse_design(source: Mapping[str, object], *, config_dir: Path) -> DesignSet
     analysis = table(section, "analysis", path="design")
     analysis_keys = {
         "calibrated",
-        "max_positive_median_delta",
-        "max_positive_worst_delta",
+        "max_median_paired_dG_separated_delta_REU",
+        "min_favorable_seed_fraction",
     }
     assert_keys(
         analysis,
@@ -138,6 +136,7 @@ def parse_design(source: Mapping[str, object], *, config_dir: Path) -> DesignSet
     finalist_keys = {
         "parallel_tasks",
         "max_candidates",
+        "max_flexibility_required_candidates",
         "max_md_candidates",
         "seeds",
         "ranking_score",
@@ -146,9 +145,7 @@ def parse_design(source: Mapping[str, object], *, config_dir: Path) -> DesignSet
         "min_passed_decoy_fraction",
         "min_successful_seeds",
         "max_positive_median_ranking_delta",
-        "max_positive_worst_ranking_delta",
         "max_positive_median_interface_delta",
-        "max_positive_worst_interface_delta",
     }
     assert_keys(
         finalists,
@@ -191,12 +188,6 @@ def parse_design(source: Mapping[str, object], *, config_dir: Path) -> DesignSet
             pack_separated=boolean(screen, "pack_separated", path="design.screen"),
         ),
         combination=CombinationSettings(
-            min_mutations=integer(
-                combination, "min_mutations", path="design.combination"
-            ),
-            max_mutations=integer(
-                combination, "max_mutations", path="design.combination"
-            ),
             max_options_per_position=integer(
                 combination,
                 "max_options_per_position",
@@ -219,11 +210,15 @@ def parse_design(source: Mapping[str, object], *, config_dir: Path) -> DesignSet
         ),
         analysis=DesignAnalysisSettings(
             calibrated=boolean(analysis, "calibrated", path="design.analysis"),
-            max_positive_median_delta=_optional_number(
-                analysis, "max_positive_median_delta", path="design.analysis"
+            max_median_paired_dG_separated_delta_REU=_optional_number(
+                analysis,
+                "max_median_paired_dG_separated_delta_REU",
+                path="design.analysis",
             ),
-            max_positive_worst_delta=_optional_number(
-                analysis, "max_positive_worst_delta", path="design.analysis"
+            min_favorable_seed_fraction=_optional_number(
+                analysis,
+                "min_favorable_seed_fraction",
+                path="design.analysis",
             ),
         ),
         finalists=FinalistSettings(
@@ -232,6 +227,11 @@ def parse_design(source: Mapping[str, object], *, config_dir: Path) -> DesignSet
             ),
             max_candidates=integer(
                 finalists, "max_candidates", path="design.finalists"
+            ),
+            max_flexibility_required_candidates=integer(
+                finalists,
+                "max_flexibility_required_candidates",
+                path="design.finalists",
             ),
             max_md_candidates=integer(
                 finalists, "max_md_candidates", path="design.finalists"
@@ -261,19 +261,9 @@ def parse_design(source: Mapping[str, object], *, config_dir: Path) -> DesignSet
                 "max_positive_median_ranking_delta",
                 path="design.finalists",
             ),
-            max_positive_worst_ranking_delta=_optional_number(
-                finalists,
-                "max_positive_worst_ranking_delta",
-                path="design.finalists",
-            ),
             max_positive_median_interface_delta=_optional_number(
                 finalists,
                 "max_positive_median_interface_delta",
-                path="design.finalists",
-            ),
-            max_positive_worst_interface_delta=_optional_number(
-                finalists,
-                "max_positive_worst_interface_delta",
                 path="design.finalists",
             ),
         ),

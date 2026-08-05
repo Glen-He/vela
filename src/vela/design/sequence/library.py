@@ -22,6 +22,8 @@ POSITIVE_RESIDUES = frozenset({"K", "R"})
 NEGATIVE_RESIDUES = frozenset({"D", "E"})
 HYDROPHOBIC_RESIDUES = frozenset({"A", "F", "I", "L", "M", "V", "W", "Y"})
 AROMATIC_RESIDUES = frozenset({"F", "W", "Y"})
+SMALL_RESIDUES = frozenset({"A", "G", "S", "T"})
+BULKY_RESIDUES = frozenset({"F", "W", "Y", "R", "K"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +39,48 @@ class SequenceFacts:
     methionine_count: int
     deamidation_motif_count: int
     aspartimide_motif_count: int
+
+
+def flexibility_reasons(
+    *, reference: str, candidate: SequenceCandidate, disulfide_positions: frozenset[int]
+) -> tuple[str, ...]:
+    """返回固定骨架可能不适用的确定性序列触发原因。"""
+    reasons: set[str] = set()
+    for position in candidate.mutation_positions:
+        wild_type = reference[position - 1]
+        mutant = candidate.sequence[position - 1]
+        if wild_type != mutant and (wild_type in {"G", "P"} or mutant in {"G", "P"}):
+            reasons.add("glycine_proline_change")
+        wild_charge = (
+            "positive"
+            if wild_type in POSITIVE_RESIDUES
+            else "negative"
+            if wild_type in NEGATIVE_RESIDUES
+            else "neutral"
+        )
+        mutant_charge = (
+            "positive"
+            if mutant in POSITIVE_RESIDUES
+            else "negative"
+            if mutant in NEGATIVE_RESIDUES
+            else "neutral"
+        )
+        if wild_charge != mutant_charge:
+            reasons.add("charge_class_change")
+        if wild_type in SMALL_RESIDUES and mutant in BULKY_RESIDUES:
+            reasons.add("small_to_bulky_change")
+        if any(abs(position - endpoint) == 1 for endpoint in disulfide_positions):
+            reasons.add("adjacent_to_disulfide")
+    if any(
+        right - left == 1
+        for left, right in zip(
+            candidate.mutation_positions,
+            candidate.mutation_positions[1:],
+            strict=False,
+        )
+    ):
+        reasons.add("adjacent_mutations")
+    return tuple(sorted(reasons))
 
 
 def sequence_facts(sequence: str) -> SequenceFacts:
@@ -172,12 +216,8 @@ def build_candidate(
         raise DesignError("candidate uses an amino acid outside the allowed design set")
     if design_round == "single" and len(mutations) != 1:
         raise DesignError("single design candidate must contain one mutation")
-    if design_round == "combination" and not (
-        settings.combination.min_mutations
-        <= len(mutations)
-        <= settings.combination.max_mutations
-    ):
-        raise DesignError("combination candidate mutation count is outside its policy")
+    if design_round == "combination" and len(mutations) != 2:
+        raise DesignError("first-generation combination must be a double mutant")
     if (
         design_round == "iteration"
         and len(mutations) > settings.iteration.max_total_mutations
@@ -265,27 +305,21 @@ def combination_library(
     ):
         raise DesignError("combination substitution map is invalid")
     candidates: list[SequenceCandidate] = []
-    for mutation_count in range(
-        settings.combination.min_mutations,
-        settings.combination.max_mutations + 1,
-    ):
-        for selected_positions in combinations(positions, mutation_count):
-            residue_sets = tuple(
-                substitutions[position] for position in selected_positions
-            )
-            for residues in product(*residue_sets):
-                sequence = list(chemistry.sequence)
-                for position, residue in zip(selected_positions, residues, strict=True):
-                    sequence[position - 1] = residue
-                candidates.append(
-                    first_generation_candidate(
-                        chemistry=chemistry,
-                        settings=settings,
-                        sequence="".join(sequence),
-                        design_round="combination",
-                        proposal_source="cross_template_single_evidence",
-                    )
+    for selected_positions in combinations(positions, 2):
+        residue_sets = tuple(substitutions[position] for position in selected_positions)
+        for residues in product(*residue_sets):
+            sequence = list(chemistry.sequence)
+            for position, residue in zip(selected_positions, residues, strict=True):
+                sequence[position - 1] = residue
+            candidates.append(
+                first_generation_candidate(
+                    chemistry=chemistry,
+                    settings=settings,
+                    sequence="".join(sequence),
+                    design_round="combination",
+                    proposal_source="cross_template_single_evidence",
                 )
+            )
     unique = {item.candidate_id: item for item in candidates}
     ordered = tuple(
         sorted(
@@ -299,25 +333,12 @@ def combination_library(
     )
     if len(ordered) <= settings.combination.max_candidates:
         return ordered
-    by_count: dict[int, list[SequenceCandidate]] = {}
-    for candidate in ordered:
-        by_count.setdefault(candidate.mutation_count, []).append(candidate)
-    counts = tuple(sorted(by_count))
-    base, remainder = divmod(settings.combination.max_candidates, len(counts))
-    selected: list[SequenceCandidate] = []
-    for index, mutation_count in enumerate(counts):
-        budget = base + (1 if index < remainder else 0)
-        selected.extend(
-            _balanced_position_selection(by_count[mutation_count], budget=budget)
-        )
     return tuple(
         sorted(
-            selected,
-            key=lambda item: (
-                item.mutation_count,
-                item.mutation_positions,
-                item.sequence,
+            _balanced_position_selection(
+                list(ordered), budget=settings.combination.max_candidates
             ),
+            key=lambda item: (item.mutation_positions, item.sequence),
         )
     )
 

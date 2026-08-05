@@ -71,9 +71,9 @@ site_coordinate_constraint_weight = 1.0
 [discovery.targets.ck2_alpha]
 reference_receptor = "3Q04_A"
 pilot_receptor = "3Q04_A"
-qualification_status = "unresolved"
-qualification_report = "unresolved"
-qualification_report_sha256 = "unresolved"
+qualification_status = "unqualified"
+qualification_report = "../outputs/discovery/qualifications/ck2-alpha-ca-holdout-qualification-20260804/qualification_report.json"
+qualification_report_sha256 = "20559c2b9b59cf2124278f48e031540f38c0a7f9a2dba4b71f783ab54fb3504c"
 # site 距离沿用预声明值；新 CA 约束开发与留出批次均不得用 native 重新选网格。
 contact_jaccard_distance = 0.8
 position_distance_A = 12.0

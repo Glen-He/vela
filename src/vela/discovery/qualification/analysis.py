@@ -10,15 +10,18 @@ from pathlib import Path
 
 from vela.config import AppConfig
 from vela.core.provenance import (
+    JsonValue,
     atomic_write_json,
     is_current_vela_software,
+    is_vela_software_identity,
     sha256_file,
     utc_now,
+    vela_software_identity,
 )
 from vela.core.typed_data import object_list, object_mapping
 from vela.discovery.analysis.cluster_engine import normalized_site_distance
 from vela.discovery.analysis.clustering import analyze_sites
-from vela.discovery.analysis.evidence import PoseEvidence
+from vela.discovery.analysis.evidence import PoseEvidence, ReceptorSite
 from vela.discovery.analysis.pose_table import read_pose_evidence
 from vela.discovery.models import DiscoveryError
 from vela.discovery.qualification.planning import (
@@ -48,6 +51,114 @@ class RecoveryMetric:
     ligand_ca_rmsd_A: float
     ligand_centroid_distance_A: float
     native_receptor_contact_fraction: float
+
+
+@dataclass(frozen=True, slots=True)
+class SeedRecall:
+    """严格采样 seed 被宽松位点候选保留的召回证据。"""
+
+    fraction: float
+    retained: tuple[int, ...]
+    missing: tuple[int, ...]
+    site_only: tuple[int, ...]
+
+
+def selection_seed_recall(
+    *, sampling_seeds: tuple[int, ...], selection_site_seeds: tuple[int, ...]
+) -> SeedRecall:
+    """计算采样成功 seed 的召回率; 额外位点 seed 只作描述性证据。"""
+    sampling = set(sampling_seeds)
+    selected = set(selection_site_seeds)
+    retained = tuple(sorted(sampling & selected))
+    return SeedRecall(
+        fraction=len(retained) / len(sampling) if sampling else 0.0,
+        retained=retained,
+        missing=tuple(sorted(sampling - selected)),
+        site_only=tuple(sorted(selected - sampling)),
+    )
+
+
+def _site_delivery_diagnostic(
+    *,
+    sites: tuple[ReceptorSite, ...],
+    recovered_pose_ids: set[str],
+    poses: dict[str, PoseEvidence],
+    poses_per_site: int,
+    refinement_seed_count: int,
+    decoys_per_seed: int,
+) -> dict[str, JsonValue]:
+    """按 native-free 排名报告预算曲线; 结果只用于开发, 不参与本批资格。"""
+    eligible = tuple(
+        sorted(
+            (site for site in sites if site.supported),
+            key=lambda site: (
+                -len(site.supporting_seeds),
+                -site.pose_count,
+                site.site_id,
+            ),
+        )
+    )
+    native_sites: list[dict[str, JsonValue]] = []
+    native_site_ranks: list[tuple[int, int]] = []
+    cumulative_recovered = 0
+    curve: list[dict[str, JsonValue]] = []
+    budgets: set[int] = {len(eligible)} if eligible else set()
+    budget = 1
+    while budget < len(eligible):
+        budgets.add(budget)
+        budget *= 2
+    for rank, site in enumerate(eligible, 1):
+        recovered = recovered_pose_ids & set(site.pose_ids)
+        if recovered:
+            native_site_ranks.append((rank, len(recovered)))
+            native_sites.append(
+                {
+                    "rank": rank,
+                    "site_id": site.site_id,
+                    "supporting_seed_count": len(site.supporting_seeds),
+                    "pose_count": site.pose_count,
+                    "native_recovered_model_count": len(recovered),
+                    "native_recovered_seeds": sorted(
+                        {poses[pose_id].seed for pose_id in recovered}
+                    ),
+                }
+            )
+        cumulative_recovered += len(recovered)
+        if rank in budgets:
+            start_count = rank * poses_per_site
+            curve.append(
+                {
+                    "site_budget": rank,
+                    "native_site_recovered": cumulative_recovered > 0,
+                    "native_recovered_model_count": cumulative_recovered,
+                    "maximum_handoff_start_count": start_count,
+                    "maximum_refinement_decoy_count": (
+                        start_count * refinement_seed_count * decoys_per_seed
+                    ),
+                }
+            )
+    primary_rank = min(
+        native_site_ranks,
+        key=lambda item: (-item[1], item[0]),
+        default=None,
+    )
+    return {
+        "qualification_gate": False,
+        "evidence_role": "development_only_after_native_evaluation",
+        "ranking": ("supporting_seed_count_desc,pose_count_desc,site_id_asc"),
+        "eligible_supported_site_count": len(eligible),
+        "native_site_count": len(native_sites),
+        "first_native_site_rank": (
+            min(rank for rank, _ in native_site_ranks) if native_site_ranks else None
+        ),
+        "primary_native_site_rank": primary_rank[0] if primary_rank else None,
+        "native_sites": native_sites,
+        "budget_curve": curve,
+        "interpretation": (
+            "post-hoc resource diagnostic; it cannot qualify this holdout or set a "
+            "future delivery budget"
+        ),
+    }
 
 
 def _document(path: Path, *, name: str) -> dict[str, object]:
@@ -157,7 +268,6 @@ def _shared_control_paths(*, config: AppConfig, raw: object) -> dict[str, Path] 
     report = _document(
         paths["qualification_report"], name="shared qualification report"
     )
-    plan = _document(paths["qualification_plan"], name="shared qualification plan")
     control = object_mapping(
         report.get("control_recovery"), name="shared control recovery"
     )
@@ -168,7 +278,7 @@ def _shared_control_paths(*, config: AppConfig, raw: object) -> dict[str, Path] 
         report.get("schema") != REPORT_SCHEMA
         or report.get("status") != "qualified"
         or selection.get("passed") is not True
-        or not is_current_vela_software(plan.get("software"))
+        or not is_current_vela_software(report.get("analysis_software"))
     ):
         raise DiscoveryError("shared qualification control did not pass")
     return paths
@@ -345,13 +455,24 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
     target_id = plan.get("target_id")
     if (
         plan.get("schema") != PLAN_SCHEMA
-        or not is_current_vela_software(plan.get("software"))
+        or not is_vela_software_identity(plan.get("software"))
         or sampling.get("schema") != SAMPLING_SCHEMA
         or sampling.get("qualification_plan_sha256") != sha256_file(plan_path)
         or sampling.get("target_id") != target_id
         or not isinstance(target_id, str)
     ):
         raise DiscoveryError("qualification evidence identity is invalid")
+    match plan.get("software"):
+        case {
+            "vela_version": str(sampling_version),
+            "vela_source_sha256": str(sampling_source_sha256),
+        }:
+            sampling_software: dict[str, JsonValue] = {
+                "vela_version": sampling_version,
+                "vela_source_sha256": sampling_source_sha256,
+            }
+        case _:
+            raise DiscoveryError("qualification sampling software is invalid")
     task_cases = _task_cases(plan)
     _sampling_task_rows(sampling=sampling, task_cases=task_cases)
     poses = read_pose_evidence(path=run_dir / "pose_evidence.tsv", run_dir=run_dir)
@@ -610,7 +731,7 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
     position_limit = control_target.analysis.position_distance_A
     if contact_limit is None or position_limit is None:
         raise DiscoveryError("control site distance thresholds are unresolved")
-    native_neighborhood_seed_support, native_neighborhood_precision = (
+    native_neighborhood_seed_support, native_neighborhood_concentration = (
         best_native_coherent_site_evidence(
             recovered=selection_site_recovered,
             poses=control_pose_by_id,
@@ -624,16 +745,25 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
     pilot_max_seed_support = max(
         (len(site.supporting_seeds) for site in pilot_supported), default=0
     )
-    if not set(selection_seeds).issubset(pool_seeds):
-        raise DiscoveryError("selected native seeds are absent from the sampling pool")
-    selection_seed_recall_fraction = (
-        len(selection_seeds) / len(pool_seeds) if pool_seeds else 0.0
+    seed_recall = selection_seed_recall(
+        sampling_seeds=tuple(pool_seeds),
+        selection_site_seeds=tuple(selection_seeds),
+    )
+    site_delivery = _site_delivery_diagnostic(
+        sites=analyze_sites(
+            poses=control_poses,
+            settings=control_target.analysis,
+        ).receptor_sites,
+        recovered_pose_ids=selection_site_recovered,
+        poses=control_pose_by_id,
+        poses_per_site=config.validation.handoff.poses_per_receptor_site,
+        refinement_seed_count=len(config.validation.seeds),
+        decoys_per_seed=config.validation.rosetta.decoys_per_seed,
     )
     sampling_passed = len(pool_seeds) >= rules.min_native_sampling_seed_support
     selection_passed = (
         bool(control_poses)
-        and selection_seed_recall_fraction
-        >= rules.min_selection_native_seed_recall_fraction
+        and seed_recall.fraction >= rules.min_selection_native_seed_recall_fraction
     )
     site_validation_passed = (
         native_neighborhood_seed_support >= rules.min_native_site_seed_support
@@ -692,6 +822,8 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
             "limitations": limitations,
             "target_id": target_id,
             "generated_at": utc_now(),
+            "sampling_software": sampling_software,
+            "analysis_software": vela_software_identity(),
             "qualification_plan": {
                 "path": plan_path.name,
                 "sha256": sha256_file(plan_path),
@@ -803,11 +935,11 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
                     "successful_seeds": selection_seeds,
                     "successful_seed_count": len(selection_seeds),
                     "sampling_pool_seed_recall_fraction": round(
-                        selection_seed_recall_fraction, 6
+                        seed_recall.fraction, 6
                     ),
-                    "missing_sampling_pool_seeds": sorted(
-                        set(pool_seeds) - set(selection_seeds)
-                    ),
+                    "retained_sampling_pool_seeds": list(seed_recall.retained),
+                    "missing_sampling_pool_seeds": list(seed_recall.missing),
+                    "additional_site_only_seeds": list(seed_recall.site_only),
                     "best_ligand_ca_rmsd_A": selected_best_rmsd,
                     "best_native_receptor_contact_fraction": selected_best_contact,
                     "exact_pose_recovery_is_qualification_gate": False,
@@ -820,11 +952,16 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> Path:
                     "native_neighborhood_seed_support": (
                         native_neighborhood_seed_support
                     ),
-                    "native_neighborhood_precision": round(
-                        native_neighborhood_precision, 6
+                    "native_neighborhood_concentration": round(
+                        native_neighborhood_concentration, 6
+                    ),
+                    "concentration_definition": (
+                        "pairwise-compatible native seed representatives divided by "
+                        "all selected poses compatible with those representatives"
                     ),
                     "qualification_gate": True,
                 },
+                "budgeted_site_delivery": site_delivery,
                 "cabsdock_top10_baseline": {
                     "passed": (
                         len(baseline_seeds) >= rules.min_native_sampling_seed_support

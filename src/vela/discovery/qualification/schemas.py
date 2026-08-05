@@ -5,4 +5,4 @@
 
 PLAN_SCHEMA = "vela.discovery-qualification-plan/6"
 SAMPLING_SCHEMA = "vela.discovery-qualification-sampling/6"
-REPORT_SCHEMA = "vela.discovery-qualification-report/7"
+REPORT_SCHEMA = "vela.discovery-qualification-report/8"

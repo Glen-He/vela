@@ -21,8 +21,8 @@ parallel_tasks = 8
 [design.analysis]
 # 数值必须由独立对照和技术先导校准，不能依据 P15 候选结果反向调整。
 calibrated = false
-max_positive_median_delta = "unresolved"
-max_positive_worst_delta = "unresolved"
+max_median_paired_dG_separated_delta_REU = "unresolved"
+min_favorable_seed_fraction = "unresolved"
 
 [design.finalists]
 # 与初筛 seed 分离；所有值必须由独立柔性恢复控制冻结。
@@ -32,6 +32,4 @@ calibrated = false
 min_passed_decoy_fraction = "unresolved"
 min_successful_seeds = "unresolved"
 max_positive_median_ranking_delta = "unresolved"
-max_positive_worst_ranking_delta = "unresolved"
 max_positive_median_interface_delta = "unresolved"
-max_positive_worst_interface_delta = "unresolved"

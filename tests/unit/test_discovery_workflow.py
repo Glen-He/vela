@@ -1,6 +1,7 @@
 from dataclasses import replace
 from pathlib import Path
 
+import gemmi
 import pytest
 
 from vela.config import load_config
@@ -18,6 +19,39 @@ from vela.validation.models import ValidationError
 from vela.validation.refinement.handoff_plan import build_handoff_tasks
 
 PROJECT_CONFIG = Path(__file__).resolve().parents[2] / "configs"
+
+
+def _write_pose_model(
+    *, receptor_path: Path, destination: Path, peptide_offset: float
+) -> None:
+    structure = gemmi.read_structure(str(receptor_path))
+    peptide = gemmi.Chain("P")
+    residue_names = (
+        "CYS",
+        "TRP",
+        "MET",
+        "SER",
+        "PRO",
+        "ARG",
+        "HIS",
+        "LEU",
+        "GLY",
+        "THR",
+        "CYS",
+    )
+    for index, name in enumerate(residue_names, 1):
+        residue = gemmi.Residue()
+        residue.name = name
+        residue.seqid = gemmi.SeqId(index, " ")
+        atom = gemmi.Atom()
+        atom.name = "CA"
+        atom.element = gemmi.Element("C")
+        atom.pos = gemmi.Position(float(index), peptide_offset, 0.0)
+        residue.add_atom(atom)
+        peptide.add_residue(residue)
+    structure[0].add_chain(peptide)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(destination, structure.make_pdb_string())
 
 
 def test_pose_table_hashes_each_shared_model_once(
@@ -75,12 +109,19 @@ def test_completed_normalized_run_produces_supported_candidate(tmp_path: Path) -
     models_dir = run_dir / "models"
     task_rows: list[dict[str, JsonValue]] = []
     evidence_rows: list[str] = []
+    config = load_config(PROJECT_CONFIG)
     for receptor, offset in (("3Q04_A", 0.0), ("3QA0_A", 0.2)):
         for seed in (11, 22):
             task_id = f"{receptor}__seed_{seed}"
             pose_id = f"{task_id}__pose_001"
             model = models_dir / f"{pose_id}.pdb"
-            atomic_write_text(model, f"MODEL {pose_id}\nEND\n")
+            _write_pose_model(
+                receptor_path=(
+                    config.paths.data_dir / "receptors" / "prepared" / f"{receptor}.cif"
+                ),
+                destination=model,
+                peptide_offset=offset + seed / 100.0,
+            )
             task_rows.append(
                 {
                     "task_id": task_id,
@@ -172,7 +213,6 @@ def test_completed_normalized_run_produces_supported_candidate(tmp_path: Path) -
     assert "\ttrue\n" in candidate_text
     assert "pose_ids" in receptor_report.read_text(encoding="utf-8").splitlines()[0]
 
-    config = load_config(PROJECT_CONFIG)
     tasks = build_handoff_tasks(
         config=config,
         discovery_run_dir=run_dir,

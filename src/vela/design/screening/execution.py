@@ -9,6 +9,7 @@ from pathlib import Path
 from vela.config import AppConfig
 from vela.core.provenance import atomic_write_json, sha256_file, utc_now
 from vela.design.models import DesignError, ScreenTask
+from vela.design.scores import SCREEN_SCORE_COLUMNS, screen_metrics
 from vela.design.screening.records import SCREEN_PLAN_NAME, ScreenPlan, read_screen_plan
 from vela.preparation.chemistry import ChemistryDefinition, HistidineState
 from vela.validation.records import file_record, resume_completed_result
@@ -17,6 +18,7 @@ from vela.validation.refinement.reconstruction import (
     write_disulfide_indices,
 )
 from vela.validation.rosetta import (
+    rosetta_crash_log_dir,
     run_rosetta_command,
     single_rosetta_pdb_output,
 )
@@ -146,7 +148,7 @@ def _run_task(
         directory=task_dir,
         filename="task_result.json",
         document_name="design screen task result",
-        schema="vela.design-screen-task-result/1",
+        schema="vela.design-screen-task-result/2",
         identity={"task_id": task.task_id, "pair_id": task.pair_id},
         plan_hash_key="screen_plan_sha256",
         plan_hash=plan_sha256,
@@ -182,12 +184,19 @@ def _run_task(
     )
     log_path = task_dir / "screen.log"
     started_at = utc_now()
-    run_rosetta_command(command=command, log_path=log_path, thread_count=1)
+    run_rosetta_command(
+        command=command,
+        log_path=log_path,
+        crash_dir=rosetta_crash_log_dir(outputs_dir=config.paths.outputs_dir),
+        thread_count=1,
+    )
     score_path = task_dir / "screen.sc"
     rows = read_rosetta_scorefile(score_path)
     if len(rows) != 1:
         raise DesignError(f"design screen task must produce one score: {task.task_id}")
-    ranking_score = rows[0].score(config.design.screen.ranking_score)
+    metrics = screen_metrics(rows[0])
+    if config.design.screen.ranking_score != "dG_separated":
+        raise DesignError("design screen ranking_score must be dG_separated")
     output_path = single_rosetta_pdb_output(task_dir)
     receptor_count, _ = validate_flexpepdock_input(
         path=output_path,
@@ -201,10 +210,11 @@ def _run_task(
     atomic_write_json(
         result_path,
         {
-            "schema": "vela.design-screen-task-result/1",
+            "schema": "vela.design-screen-task-result/2",
             "status": "completed",
             "task_id": task.task_id,
             "pair_id": task.pair_id,
+            "wt_context_id": task.wt_context_id,
             "state": task.state,
             "candidate_id": task.candidate.candidate_id,
             "template_id": task.template.template_id,
@@ -214,8 +224,9 @@ def _run_task(
             "screen_plan_sha256": plan_sha256,
             "started_at": started_at,
             "completed_at": utc_now(),
-            "ranking_score_name": config.design.screen.ranking_score,
-            "ranking_score": ranking_score,
+            "score_units": "Rosetta score units (REU) unless stated otherwise",
+            "score_columns": SCREEN_SCORE_COLUMNS,
+            "interface_metrics": metrics.as_dict(),
             "command": list(command),
             "output": file_record(output_path, root=task_dir),
             "scorefile": file_record(score_path, root=task_dir),
@@ -235,17 +246,30 @@ def run_screen(*, config: AppConfig, run_dir: Path) -> ScreenOutcome:
     plan_path = run_dir / SCREEN_PLAN_NAME
     plan_sha256 = sha256_file(plan_path)
 
-    def execute(task: ScreenTask) -> Path:
-        return _run_task(config=config, plan=plan, task=task, plan_sha256=plan_sha256)
+    execution_tasks: list[ScreenTask] = []
+    canonical_wt_tasks: dict[str, ScreenTask] = {}
+    for task in plan.tasks:
+        if task.wt_context_id is None:
+            execution_tasks.append(task)
+            continue
+        if task.wt_context_id not in canonical_wt_tasks:
+            canonical_wt_tasks[task.wt_context_id] = task
+            execution_tasks.append(task)
+
+    def execute(task: ScreenTask) -> tuple[str, Path]:
+        result = _run_task(config=config, plan=plan, task=task, plan_sha256=plan_sha256)
+        key = task.wt_context_id or task.task_id
+        return key, result
 
     with ThreadPoolExecutor(
         max_workers=config.design.screen.parallel_tasks
     ) as executor:
-        results = tuple(executor.map(execute, plan.tasks))
+        executed = dict(executor.map(execute, execution_tasks))
+    results = tuple(executed[task.wt_context_id or task.task_id] for task in plan.tasks)
     atomic_write_json(
         manifest_path,
         {
-            "schema": "vela.design-screen-manifest/1",
+            "schema": "vela.design-screen-manifest/2",
             "stage": "design_interface_screen",
             "status": "completed",
             "completed_at": utc_now(),
@@ -253,6 +277,9 @@ def run_screen(*, config: AppConfig, run_dir: Path) -> ScreenOutcome:
             "method_id": config.design.method_id,
             "chemistry_id": config.chemistry.chemistry_id,
             "objective": config.design.objective,
+            "logical_pair_count": len(plan.tasks) // 2,
+            "executed_task_count": len(execution_tasks),
+            "shared_wt_context_count": len(canonical_wt_tasks),
             "screen_plan": file_record(plan_path, root=run_dir),
             "tasks": [
                 {
@@ -262,10 +289,11 @@ def run_screen(*, config: AppConfig, run_dir: Path) -> ScreenOutcome:
                     "candidate_id": task.candidate.candidate_id,
                     "template_id": task.template.template_id,
                     "seed": task.seed,
+                    "wt_context_id": task.wt_context_id,
                     "task_result": file_record(result, root=run_dir),
                 }
                 for task, result in zip(plan.tasks, results, strict=True)
             ],
         },
     )
-    return ScreenOutcome(manifest_path, len(plan.tasks))
+    return ScreenOutcome(manifest_path, len(execution_tasks))

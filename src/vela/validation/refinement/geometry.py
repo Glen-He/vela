@@ -57,6 +57,7 @@ class GeometryAssessment:
     start_site_displacement_A: float
     passed: bool
     cluster_backbone: tuple[gemmi.Position, ...]
+    receptor_contacts: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,6 +339,7 @@ def assess_complex_geometry(
         displacement,
         passed,
         cluster_backbone,
+        decoy.receptor_contacts,
     )
 
 

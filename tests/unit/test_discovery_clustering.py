@@ -5,7 +5,10 @@ import pytest
 from vela.discovery.analysis.clustering import analyze_sites
 from vela.discovery.analysis.evidence import PoseEvidence
 from vela.discovery.models import DiscoveryError, SiteAnalysisSettings
-from vela.discovery.qualification.analysis import best_native_coherent_site_evidence
+from vela.discovery.qualification.analysis import (
+    best_native_coherent_site_evidence,
+    selection_seed_recall,
+)
 
 SETTINGS = SiteAnalysisSettings(
     contact_jaccard_distance=0.5,
@@ -217,3 +220,39 @@ def test_native_site_support_requires_pairwise_compatible_poses() -> None:
 
     assert seed_support == 2
     assert precision == 1.0
+
+
+def test_selection_seed_recall_allows_additional_site_only_seeds() -> None:
+    recall = selection_seed_recall(
+        sampling_seeds=(120666,),
+        selection_site_seeds=(120664, 120666, 120667),
+    )
+
+    assert recall.fraction == 1.0
+    assert recall.retained == (120666,)
+    assert recall.missing == ()
+    assert recall.site_only == (120664, 120667)
+
+
+def test_selection_seed_recall_reports_missing_sampling_seeds() -> None:
+    recall = selection_seed_recall(
+        sampling_seeds=(120666, 120670),
+        selection_site_seeds=(120664, 120666),
+    )
+
+    assert recall.fraction == 0.5
+    assert recall.retained == (120666,)
+    assert recall.missing == (120670,)
+    assert recall.site_only == (120664,)
+
+
+def test_selection_seed_recall_does_not_invent_success_without_sampling_hits() -> None:
+    recall = selection_seed_recall(
+        sampling_seeds=(),
+        selection_site_seeds=(120664,),
+    )
+
+    assert recall.fraction == 0.0
+    assert recall.retained == ()
+    assert recall.missing == ()
+    assert recall.site_only == (120664,)

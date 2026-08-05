@@ -16,6 +16,7 @@ from vela.core.provenance import (
     atomic_write_json,
     atomic_write_text,
     sha256_file,
+    sha256_text,
     utc_now,
     vela_software_identity,
 )
@@ -208,6 +209,21 @@ def _write_resfiles_and_tasks(
                 pair_index += 1
                 for state in ("wt", "mutant"):
                     path, digest = paths[state]
+                    wt_context_id = (
+                        "wt_"
+                        + sha256_text(
+                            "\0".join(
+                                (
+                                    template.template_id,
+                                    str(seed),
+                                    config.chemistry.chemistry_id,
+                                    digest,
+                                )
+                            )
+                        )[:16]
+                        if state == "wt"
+                        else None
+                    )
                     tasks.append(
                         ScreenTask(
                             task_id=f"screen_{task_index:07d}",
@@ -218,6 +234,7 @@ def _write_resfiles_and_tasks(
                             seed=seed,
                             resfile_path=path,
                             resfile_sha256=digest,
+                            wt_context_id=wt_context_id,
                         )
                     )
                     task_index += 1
@@ -314,7 +331,7 @@ def write_screen_plan(
     atomic_write_json(
         plan_path,
         {
-            "schema": "vela.design-screen-plan/1",
+            "schema": "vela.design-screen-plan/2",
             "stage": "design_interface_screen",
             "status": "planned",
             "run_id": run_id,
@@ -343,6 +360,7 @@ def write_screen_plan(
                     "template_id": task.template.template_id,
                     "seed": task.seed,
                     "resfile": file_record(task.resfile_path, root=run_dir),
+                    "wt_context_id": task.wt_context_id,
                     "status": "planned",
                 }
                 for task in tasks
@@ -423,8 +441,8 @@ def _analysis_candidates(path: Path) -> tuple[dict[str, str], ...]:
         required = {
             "candidate_id",
             "mutation_positions",
-            "positive_median_delta_score",
-            "positive_worst_delta_score",
+            "positive_median_paired_dG_separated_delta_REU",
+            "positive_worst_paired_dG_separated_delta_REU",
             "candidate_status",
         }
         if reader.fieldnames is None or not required.issubset(reader.fieldnames):
@@ -458,7 +476,7 @@ def write_combination_screen_plan(
     manifest_path = source / "screen_analysis" / "analysis_manifest.json"
     manifest = read_document(manifest_path, name="single-screen analysis manifest")
     if (
-        manifest.get("schema") != "vela.design-screen-analysis-manifest/1"
+        manifest.get("schema") != "vela.design-screen-analysis-manifest/2"
         or manifest.get("status") != "completed"
         or manifest.get("design_round") != "single"
         or manifest.get("objective") != config.design.objective
@@ -478,14 +496,14 @@ def write_combination_screen_plan(
     by_id = {item.candidate_id: item for item in parent.candidates}
     ranked: dict[int, list[tuple[float, float, str, str]]] = defaultdict(list)
     for row in _analysis_candidates(summary_path):
-        if row["candidate_status"] != "eligible":
+        if row["candidate_status"] != "screen_supported":
             continue
         candidate = by_id.get(row["candidate_id"])
         if candidate is None or candidate.mutation_count != 1:
             raise DesignError("single-screen summary references an invalid candidate")
         try:
-            worst = float(row["positive_worst_delta_score"])
-            median = float(row["positive_median_delta_score"])
+            worst = float(row["positive_worst_paired_dG_separated_delta_REU"])
+            median = float(row["positive_median_paired_dG_separated_delta_REU"])
         except ValueError as exc:
             raise DesignError(
                 "single-screen summary contains an invalid score"

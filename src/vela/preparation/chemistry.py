@@ -216,6 +216,26 @@ def chemistry_record(
     }
 
 
+def chemistry_identity_record(definition: ChemistryDefinition) -> dict[str, JsonValue]:
+    """返回跨阶段计划中使用的稳定化学身份; 不包含运行时状态。"""
+    return {
+        "chemistry_id": definition.chemistry_id,
+        "ligand_id": definition.ligand_id,
+        "sequence": definition.sequence,
+        "chirality": definition.chirality,
+        "n_terminus": definition.n_terminus,
+        "c_terminus": definition.c_terminus,
+        "target_ph": definition.target_ph,
+        "histidines": {
+            str(item.position): item.state for item in definition.histidines
+        },
+        "disulfide_bonds": [
+            [bond.first, bond.second] for bond in definition.disulfide_bonds
+        ],
+        "other_modifications_status": definition.other_modifications_status,
+    }
+
+
 def write_chemistry_record(
     *, definition: ChemistryDefinition, destination: Path
 ) -> ChemistryAssessment:

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
+
+import gemmi
 
 from vela.config import AppConfig
 from vela.core.errors import VelaError
@@ -16,7 +19,8 @@ from vela.core.provenance import (
     vela_software_identity,
 )
 from vela.core.run_identity import validate_run_id
-from vela.discovery.analysis.evidence import PoseEvidence
+from vela.discovery.analysis.cluster_engine import bounded_leader_clusters
+from vela.discovery.analysis.evidence import PoseEvidence, ReceptorSite
 from vela.discovery.analysis.pose_table import read_pose_evidence
 from vela.discovery.analysis.reports import (
     ReportedCandidateSite,
@@ -24,6 +28,13 @@ from vela.discovery.analysis.reports import (
     read_site_analysis_report,
 )
 from vela.discovery.models import DiscoveryError
+from vela.discovery.sampling.evidence import (
+    align_receptor,
+    read_reference_chains,
+    read_structure,
+    required_atom,
+    split_model,
+)
 from vela.discovery.sampling.planning import MAIN_DISCOVERY_EVIDENCE
 from vela.validation.models import ValidationError
 from vela.validation.records import safe_identifier
@@ -86,34 +97,116 @@ def _selected_candidates(
     return selected
 
 
-def _site_poses(
+def select_site_poses(
     *,
-    site: ReportedReceptorSite,
+    site: ReceptorSite | ReportedReceptorSite,
     pose_by_id: dict[str, PoseEvidence],
     count: int,
+    peptide_sequence: str,
+    reference_receptor_path: Path,
+    pose_clustering_rmsd_A: float,
 ) -> tuple[PoseEvidence, ...]:
+    """从不同姿态簇选择跨 seed 的几何 medoid。"""
     if not site.supported:
         raise ValidationError(f"unsupported receptor site in candidate: {site.site_id}")
+    if count < 1 or pose_clustering_rmsd_A <= 0:
+        raise ValidationError("handoff pose selection settings must be positive")
     missing = sorted(set(site.pose_ids) - set(pose_by_id))
     if missing:
         raise ValidationError(f"receptor site refers to unknown pose: {missing[0]}")
-    poses = tuple(pose_by_id[pose_id] for pose_id in site.pose_ids)
-    ordered = sorted(
+    poses = tuple(
+        pose_by_id[pose_id]
+        for pose_id in site.pose_ids
+        if pose_by_id[pose_id].qc_status == "passed"
+    )
+    reference = read_reference_chains(reference_receptor_path)
+    structures: dict[Path, gemmi.Structure] = {}
+    coordinates: dict[str, tuple[gemmi.Position, ...]] = {}
+    for pose in poses:
+        structure = structures.get(pose.model_path)
+        if structure is None:
+            structure = read_structure(pose.model_path)
+            structures[pose.model_path] = structure
+        if pose.model_index > len(structure):
+            raise ValidationError(
+                f"handoff pose model index is outside its structure: {pose.pose_id}"
+            )
+        receptor, peptide = split_model(
+            structure[pose.model_index - 1], peptide_sequence=peptide_sequence
+        )
+        alignment = align_receptor(receptor=receptor, reference_chains=reference)
+        coordinates[pose.pose_id] = tuple(
+            gemmi.Position(alignment.transform.apply(required_atom(residue, "CA").pos))
+            for residue in peptide
+        )
+
+    def distance(first: PoseEvidence, second: PoseEvidence) -> float:
+        left = coordinates[first.pose_id]
+        right = coordinates[second.pose_id]
+        if len(left) != len(right) or not left:
+            raise ValidationError("handoff peptide CA identities differ")
+        return math.sqrt(
+            sum(
+                first_position.dist(second_position) ** 2
+                for first_position, second_position in zip(left, right, strict=True)
+            )
+            / len(left)
+        )
+
+    clusters = bounded_leader_clusters(
         poses,
-        key=lambda pose: (
-            pose.pose_id != site.representative_pose_id,
-            pose.ranking_score,
-            pose.pose_id,
+        distance=distance,
+        identity=lambda pose: pose.pose_id,
+        maximum_distance=pose_clustering_rmsd_A,
+    )
+    ranked_clusters = sorted(
+        clusters,
+        key=lambda cluster: (
+            -len({pose.seed for pose in cluster}),
+            -len(cluster),
+            min(pose.ranking_score for pose in cluster),
+            min(pose.pose_id for pose in cluster),
         ),
     )
     selected: list[PoseEvidence] = []
     seeds: set[int] = set()
-    for pose in ordered:
-        if pose.qc_status == "passed" and pose.seed not in seeds:
-            selected.append(pose)
-            seeds.add(pose.seed)
+    for cluster in ranked_clusters:
+        eligible = tuple(pose for pose in cluster if pose.seed not in seeds)
+        if eligible:
+            medoid = min(
+                eligible,
+                key=lambda pose: (
+                    sum(distance(pose, other) for other in cluster),
+                    pose.ranking_score,
+                    pose.pose_id,
+                ),
+            )
+            selected.append(medoid)
+            seeds.add(medoid.seed)
         if len(selected) == count:
             break
+    if len(selected) < count:
+        selected_ids = {pose.pose_id for pose in selected}
+        for cluster in ranked_clusters:
+            eligible = tuple(
+                pose
+                for pose in cluster
+                if pose.pose_id not in selected_ids and pose.seed not in seeds
+            )
+            if eligible:
+                medoid = min(
+                    eligible,
+                    key=lambda pose: (
+                        sum(distance(pose, other) for other in cluster),
+                        pose.ranking_score,
+                        pose.pose_id,
+                    ),
+                )
+                selected.append(medoid)
+                selected_ids.add(medoid.pose_id)
+                seeds.add(medoid.seed)
+            if len(selected) == count:
+                break
     if len(selected) != count:
         raise ValidationError(
             f"{site.site_id} lacks {count} passed poses from distinct seeds"
@@ -148,25 +241,30 @@ def build_handoff_tasks(
             site = report.receptor_sites.get(site_id)
             if site is None:
                 raise ValidationError(f"candidate refers to unknown site: {site_id}")
-            for pose in _site_poses(
+            reference_receptor_path = (
+                config.paths.data_dir
+                / "receptors"
+                / "prepared"
+                / f"{site.receptor_id}.cif"
+            )
+            if not reference_receptor_path.is_file():
+                raise ValidationError(
+                    f"prepared reference receptor is missing: {site.receptor_id}"
+                )
+            for pose in select_site_poses(
                 site=site,
                 pose_by_id=pose_by_id,
                 count=config.validation.handoff.poses_per_receptor_site,
+                peptide_sequence=config.chemistry.sequence,
+                reference_receptor_path=reference_receptor_path,
+                pose_clustering_rmsd_A=(
+                    config.discovery.cabsdock.pose_clustering_rmsd_A
+                ),
             ):
                 _identifier(pose.pose_id, name="pose ID")
                 task_id = _identifier(
                     f"{candidate.candidate_id}__{pose.pose_id}", name="handoff task ID"
                 )
-                reference_receptor_path = (
-                    config.paths.data_dir
-                    / "receptors"
-                    / "prepared"
-                    / f"{pose.receptor_id}.cif"
-                )
-                if not reference_receptor_path.is_file():
-                    raise ValidationError(
-                        f"prepared reference receptor is missing: {pose.receptor_id}"
-                    )
                 tasks.append(
                     CandidateHandoffTask(
                         task_id=task_id,
@@ -270,7 +368,7 @@ def write_handoff_plan(
     atomic_write_json(
         run_dir / HANDOFF_PLAN_NAME,
         {
-            "schema": "vela.validation-handoff-plan/3",
+            "schema": "vela.validation-handoff-plan/6",
             "stage": "validation_candidate_handoff",
             "status": "planned",
             "run_id": run_id,
@@ -308,6 +406,13 @@ def write_handoff_plan(
                 "requested_candidate_ids": list(candidate_ids),
                 "poses_per_receptor_site": (
                     config.validation.handoff.poses_per_receptor_site
+                ),
+                "pose_clustering_rmsd_A": (
+                    config.discovery.cabsdock.pose_clustering_rmsd_A
+                ),
+                "pose_selection": (
+                    "pose_cluster_seed_support_desc,population_desc,energy_asc; "
+                    "cluster_medoid; distinct_seed; within_cluster_fill_if_needed"
                 ),
                 "distinct_seed_required": True,
                 "supported_candidates_only": True,

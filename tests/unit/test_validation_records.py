@@ -7,6 +7,7 @@ from vela.core.provenance import (
     JsonValue,
     atomic_write_json,
     is_current_vela_software,
+    is_vela_software_identity,
     vela_software_identity,
 )
 from vela.design.models import DesignError
@@ -72,8 +73,25 @@ def test_atomic_json_rejects_non_finite_numbers(tmp_path: Path) -> None:
 def test_software_identity_detects_a_different_source_tree() -> None:
     identity = vela_software_identity()
 
+    assert is_vela_software_identity(identity)
+    assert is_vela_software_identity({**identity, "vela_source_sha256": "0" * 64})
     assert is_current_vela_software(identity)
     assert not is_current_vela_software({**identity, "vela_source_sha256": "0" * 64})
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {},
+        {"vela_version": "0.1.0", "vela_source_sha256": "short"},
+        {"vela_version": "", "vela_source_sha256": "0" * 64},
+        {"vela_version": "0.1.0", "vela_source_sha256": "G" * 64},
+    ],
+)
+def test_software_identity_rejects_invalid_historical_records(
+    identity: dict[str, str],
+) -> None:
+    assert not is_vela_software_identity(identity)
 
 
 def test_resume_completed_result_validates_identity_and_files(tmp_path: Path) -> None:

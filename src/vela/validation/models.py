@@ -36,6 +36,8 @@ class BoundStateDefinition:
     ligand_author_chain_id: str
     local_control_kind: str
     ligand_sequence: str | None
+    ligand_n_terminus: str | None
+    ligand_c_terminus: str | None
     disulfide_bonds: tuple[DisulfideBond, ...]
     histidines: tuple[HistidineState, ...]
     selection_reason: str
@@ -72,6 +74,14 @@ class BoundStateDefinition:
                 raise ValidationError(
                     f"{self.state_id} cyclic peptide control requires a disulfide"
                 )
+            if self.ligand_n_terminus not in {"NH3+", "Acetyl"}:
+                raise ValidationError(
+                    f"{self.state_id} standard peptide N terminus is unsupported"
+                )
+            if self.ligand_c_terminus not in {"CONH2", "COO-"}:
+                raise ValidationError(
+                    f"{self.state_id} standard peptide C terminus is unsupported"
+                )
             seen_positions: set[int] = set()
             for bond in self.disulfide_bonds:
                 if not 1 <= bond.first < bond.second <= len(self.ligand_sequence):
@@ -106,8 +116,14 @@ class BoundStateDefinition:
                 raise ValidationError(
                     f"{self.state_id} ligand histidine state must be HID, HIE, or HIP"
                 )
-        elif (
-            self.ligand_sequence is not None or self.disulfide_bonds or self.histidines
+        elif any(
+            (
+                self.ligand_sequence is not None,
+                self.ligand_n_terminus is not None,
+                self.ligand_c_terminus is not None,
+                bool(self.disulfide_bonds),
+                bool(self.histidines),
+            )
         ):
             raise ValidationError(
                 f"{self.state_id} site-only reference must not define standard peptide chemistry"

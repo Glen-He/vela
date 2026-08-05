@@ -2,8 +2,9 @@
 
 from vela.config import AppConfig
 from vela.discovery.models import DiscoveryError
-from vela.preparation.chemistry import ChemistryDefinition, HistidineState
-from vela.validation.models import BoundStateDefinition
+from vela.preparation.chemistry import ChemistryDefinition
+from vela.validation.bound_states.assets import standard_peptide_chemistry
+from vela.validation.models import BoundStateDefinition, ValidationError
 
 
 def control_bound_state(config: AppConfig) -> BoundStateDefinition:
@@ -36,24 +37,8 @@ def control_bound_state(config: AppConfig) -> BoundStateDefinition:
 
 
 def control_chemistry(state: BoundStateDefinition) -> ChemistryDefinition:
-    """建立只用于粗粒化采样和拓扑校准的控制肽化学身份。"""
-    sequence = state.ligand_sequence
-    if sequence is None:
-        raise DiscoveryError("qualification control ligand sequence is unresolved")
-    return ChemistryDefinition(
-        ligand_id=state.ligand_id.lower(),
-        chemistry_id=f"qualification-{state.state_id}",
-        sequence=sequence,
-        chirality="L",
-        disulfide_bonds=state.disulfide_bonds,
-        n_terminus="not_assessed_by_topology_calibration",
-        c_terminus="not_assessed_by_topology_calibration",
-        target_ph=None,
-        net_charge=None,
-        histidines=tuple(
-            HistidineState(item.position, item.state) for item in state.histidines
-        ),
-        other_modifications_status="none",
-        other_modifications=(),
-        decision_sources=(f"experimental control {state.state_id}",),
-    )
+    """建立贯穿粗粒化采样、拓扑恢复和局部资格的控制肽化学身份。"""
+    try:
+        return standard_peptide_chemistry(state)
+    except ValidationError as exc:
+        raise DiscoveryError(str(exc)) from exc

@@ -6,11 +6,36 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from vela.core.provenance import sha256_file
 from vela.validation.bound_states.assets import PEPTIDE_CHAIN, RECEPTOR_CHAIN
 from vela.validation.models import RosettaSettings, ValidationError
+
+ROSETTA_CRASH_LOG_NAME = "ROSETTA_CRASH.log"
+
+
+def rosetta_crash_log_dir(*, outputs_dir: Path) -> Path:
+    """返回集中保存 Rosetta 崩溃转储的目录。"""
+    return outputs_dir.parent / "logs" / "rosetta_crashes"
+
+
+def _preserve_crash_log(*, crash_dir: Path, log_path: Path) -> Path | None:
+    """把本次运行产生的崩溃转储改成可归属的唯一文件名。"""
+    crash_log = crash_dir / ROSETTA_CRASH_LOG_NAME
+    if not crash_log.is_file():
+        return None
+    stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
+    target = crash_dir / f"{stamp}-{log_path.stem}-{ROSETTA_CRASH_LOG_NAME}"
+    counter = 2
+    while target.exists():
+        target = (
+            crash_dir / f"{stamp}-{log_path.stem}-{counter}-{ROSETTA_CRASH_LOG_NAME}"
+        )
+        counter += 1
+    crash_log.replace(target)
+    return target
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,9 +66,10 @@ def run_rosetta_command(
     *,
     command: tuple[str, ...],
     log_path: Path,
+    crash_dir: Path,
     thread_count: int | None = None,
 ) -> None:
-    """执行已构造的 Rosetta 命令并把完整输出写入指定日志。"""
+    """执行 Rosetta 命令并把崩溃转储限制在 crash_dir 内唯一改名保存。"""
     environment: dict[str, str] | None = None
     if thread_count is not None:
         environment = os.environ.copy()
@@ -55,19 +81,23 @@ def run_rosetta_command(
             "NUMEXPR_NUM_THREADS",
         ):
             environment[name] = str(thread_count)
+    crash_dir.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as log:
         result = subprocess.run(
             command,
             check=False,
+            cwd=crash_dir,
             stdout=log,
             stderr=subprocess.STDOUT,
             text=True,
             env=environment,
         )
+    crash_log = _preserve_crash_log(crash_dir=crash_dir, log_path=log_path)
     if result.returncode != 0:
-        raise ValidationError(
-            f"Rosetta failed with exit code {result.returncode}: {log_path}"
-        )
+        message = f"Rosetta failed with exit code {result.returncode}: {log_path}"
+        if crash_log is not None:
+            message = f"{message} (crash report: {crash_log})"
+        raise ValidationError(message)
 
 
 def single_rosetta_pdb_output(output_dir: Path) -> Path:
@@ -201,11 +231,13 @@ def build_chemistry_command(
     disulfide_path: Path,
     output_dir: Path,
     seed: int,
+    fixed_histidine_pose_indices: tuple[int, ...],
+    scorefile_name: str = "chemistry.sc",
 ) -> tuple[str, ...]:
     """建立只恢复显式化学变体、不执行局部采样的 RosettaScripts 命令。"""
     if seed < 0:
         raise ValidationError("RosettaScripts seed must not be negative")
-    return (
+    command = [
         str(settings.scripts_executable),
         "-database",
         str(settings.database),
@@ -217,19 +249,108 @@ def build_chemistry_command(
         str(disulfide_path),
         "-score:weights",
         settings.score_function,
-        "-constant_seed",
-        "-jran",
-        str(seed),
-        "-nstruct",
-        "1",
-        "-out:path:pdb",
-        str(output_dir),
-        "-out:path:score",
-        str(output_dir),
-        "-out:file:scorefile",
-        "chemistry.sc",
-        "-overwrite",
+    ]
+    if fixed_histidine_pose_indices:
+        command.extend(
+            [
+                "-packing:fix_his_tautomer",
+                *(str(index) for index in fixed_histidine_pose_indices),
+            ]
+        )
+    command.extend(
+        [
+            "-constant_seed",
+            "-jran",
+            str(seed),
+            "-nstruct",
+            "1",
+            "-out:path:pdb",
+            str(output_dir),
+            "-out:path:score",
+            str(output_dir),
+            "-out:file:scorefile",
+            scorefile_name,
+            "-overwrite",
+        ]
     )
+    return tuple(command)
+
+
+def build_chemistry_refine_command(
+    *,
+    settings: RosettaSettings,
+    input_path: Path,
+    protocol_path: Path,
+    disulfide_path: Path,
+    output_dir: Path,
+    seed: int,
+    fixed_histidine_pose_indices: tuple[int, ...],
+    site_constraint_path: Path,
+    site_constraint_weight: float,
+) -> tuple[str, ...]:
+    """在同一 Rosetta Pose 内恢复化学身份并受约束地局部精修。"""
+    if site_constraint_weight <= 0:
+        raise ValidationError("site coordinate constraint weight must be positive")
+    command = list(
+        build_chemistry_command(
+            settings=settings,
+            input_path=input_path,
+            protocol_path=protocol_path,
+            disulfide_path=disulfide_path,
+            output_dir=output_dir,
+            seed=seed,
+            fixed_histidine_pose_indices=fixed_histidine_pose_indices,
+        )
+    )
+    command.extend(
+        [
+            "-flexPepDocking:receptor_chain",
+            RECEPTOR_CHAIN,
+            "-flexPepDocking:peptide_chain",
+            PEPTIDE_CHAIN,
+            "-constraints:cst_fa_file",
+            str(site_constraint_path),
+            "-constraints:cst_fa_weight",
+            str(site_constraint_weight),
+        ]
+    )
+    return tuple(command)
+
+
+def build_chemistry_flexpepdock_command(
+    *,
+    settings: RosettaSettings,
+    input_path: Path,
+    protocol_path: Path,
+    disulfide_path: Path,
+    output_dir: Path,
+    seed: int,
+    fixed_histidine_pose_indices: tuple[int, ...],
+    nstruct: int,
+    scorefile_name: str,
+    native_path: Path | None,
+) -> tuple[str, ...]:
+    """建立保持端基和微状态的 RosettaScripts FlexPepDock 命令。"""
+    if nstruct < 1:
+        raise ValidationError("FlexPepDock nstruct must be positive")
+    command = list(
+        build_chemistry_command(
+            settings=settings,
+            input_path=input_path,
+            protocol_path=protocol_path,
+            disulfide_path=disulfide_path,
+            output_dir=output_dir,
+            seed=seed,
+            fixed_histidine_pose_indices=fixed_histidine_pose_indices,
+            scorefile_name=scorefile_name,
+        )
+    )
+    nstruct_index = command.index("-nstruct") + 1
+    command[nstruct_index] = str(nstruct)
+    command.extend(("-ex1", "-ex2aro", "-use_input_sc", "-packing:no_optH", "true"))
+    if native_path is not None:
+        command.extend(("-native", str(native_path)))
+    return tuple(command)
 
 
 def _common_command(

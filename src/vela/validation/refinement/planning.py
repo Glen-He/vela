@@ -29,7 +29,10 @@ from vela.validation.records import (
 )
 from vela.validation.refinement.guided import GUIDED_EVIDENCE
 from vela.validation.refinement.reconstruction import validate_flexpepdock_input
-from vela.validation.rosetta import verify_flexpepdock_tool
+from vela.validation.rosetta import (
+    verify_flexpepdock_tool,
+    verify_rosetta_scripts_tool,
+)
 
 REFINEMENT_PLAN_NAME = "refinement_plan.json"
 BLIND_REFINEMENT_EVIDENCE = "main_discovery_local_refinement"
@@ -110,7 +113,7 @@ def read_refinement_source(
             evidence_category=BLIND_REFINEMENT_EVIDENCE,
             known_site_information_used=False,
         )
-        expected_schema = "vela.validation-handoff-manifest/3"
+        expected_schema = "vela.validation-handoff-manifest/7"
         source_plan_key = "handoff_plan"
         expected_source_evidence = "main_discovery_handoff"
     else:
@@ -149,15 +152,30 @@ def read_refinement_source(
         except TypeError as exc:
             raise ValidationError("handoff manifest task is invalid") from exc
         start_id = safe_identifier(row.get("task_id"), name="handoff task ID")
-        input_path, input_hash = validate_record(
-            root=source_run_dir,
-            raw=row.get("flexpepdock_input"),
-            name=f"{start_id} FlexPepDock input",
-        )
         validate_record(
             root=source_run_dir,
             raw=row.get("task_result"),
             name=f"{start_id} task result",
+        )
+        if source.kind == "blind_handoff":
+            execution_status = row.get("execution_status")
+            reconstruction_status = row.get("reconstruction_status")
+            if execution_status == "invalid":
+                raise ValidationError("invalid handoff task cannot be refined")
+            if execution_status != "completed":
+                raise ValidationError("handoff execution status is invalid")
+            if reconstruction_status == "failed":
+                if row.get("flexpepdock_input") is not None:
+                    raise ValidationError(
+                        "failed handoff task must not declare a FlexPepDock input"
+                    )
+                continue
+            if reconstruction_status != "passed":
+                raise ValidationError("handoff reconstruction status is invalid")
+        input_path, input_hash = validate_record(
+            root=source_run_dir,
+            raw=row.get("flexpepdock_input"),
+            name=f"{start_id} FlexPepDock input",
         )
         receptor_count, histidines = validate_flexpepdock_input(
             path=input_path,
@@ -218,6 +236,7 @@ def refinement_parameters(config: AppConfig) -> dict[str, JsonValue]:
         "decoys_per_seed": settings.rosetta.decoys_per_seed,
         "score_function": settings.rosetta.score_function,
         "lowres_preoptimize": settings.rosetta.lowres_preoptimize,
+        "application": "rosetta_scripts_with_in_pose_chemistry_restoration",
     }
 
 
@@ -255,7 +274,8 @@ def write_refinement_plan(
         )
     source, _ = read_refinement_source(config=config, source_run_dir=source_run_dir)
     tasks = build_refinement_tasks(config=config, source_run_dir=source_run_dir)
-    tool = verify_flexpepdock_tool(config.validation.rosetta)
+    flexpepdock = verify_flexpepdock_tool(config.validation.rosetta)
+    scripts = verify_rosetta_scripts_tool(config.validation.rosetta)
     run_dir = config.paths.outputs_dir / "validation" / "refinements" / run_id
     if run_dir.exists():
         raise ValidationError(f"refinement run directory already exists: {run_dir}")
@@ -273,7 +293,7 @@ def write_refinement_plan(
     atomic_write_json(
         run_dir / REFINEMENT_PLAN_NAME,
         {
-            "schema": "vela.validation-refinement-plan/1",
+            "schema": "vela.validation-refinement-plan/2",
             "stage": "validation_local_refinement",
             "status": "planned",
             "run_id": run_id,
@@ -284,8 +304,9 @@ def write_refinement_plan(
             "known_site_information_used": source.known_site_information_used,
             "software": {
                 **vela_software_identity(),
-                "rosetta_version": tool.version,
-                "flexpepdock_sha256": tool.executable_sha256,
+                "rosetta_version": flexpepdock.version,
+                "flexpepdock_sha256": flexpepdock.executable_sha256,
+                "rosetta_scripts_sha256": scripts.executable_sha256,
             },
             "inputs": {
                 "config_snapshot": file_record(snapshot, root=run_dir),
@@ -349,7 +370,7 @@ def verify_refinement_plan(
         raise ValidationError("Stage 3 candidate refinement is no longer ready")
     plan = read_document(run_dir / REFINEMENT_PLAN_NAME, name="refinement plan")
     if (
-        plan.get("schema") != "vela.validation-refinement-plan/1"
+        plan.get("schema") != "vela.validation-refinement-plan/2"
         or plan.get("stage") != "validation_local_refinement"
         or plan.get("status") != "planned"
         or not is_current_vela_software(plan.get("software"))
@@ -439,4 +460,5 @@ def verify_refinement_plan(
     ):
         raise ValidationError("current refinement tasks differ from frozen plan")
     verify_flexpepdock_tool(config.validation.rosetta)
+    verify_rosetta_scripts_tool(config.validation.rosetta)
     return plan, tasks

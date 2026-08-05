@@ -26,6 +26,7 @@ from vela.commands.stages import (
     preparation_run,
     preparation_status,
     validation_candidate_review,
+    validation_control_analyze,
     validation_control_plan,
     validation_control_run,
     validation_environment_map,
@@ -34,6 +35,11 @@ from vela.commands.stages import (
     validation_handoff_plan,
     validation_handoff_run,
     validation_prepare,
+    validation_qualification_handoff_plan,
+    validation_qualification_handoff_run,
+    validation_qualification_refinement_analyze,
+    validation_qualification_refinement_plan,
+    validation_qualification_refinement_run,
     validation_refinement_analyze,
     validation_refinement_plan,
     validation_refinement_run,
@@ -336,6 +342,8 @@ def execute(
     replication_run: Path | None = None,
     refinement_source: Path | None = None,
     topology_source: Path | None = None,
+    qualification_source: Path | None = None,
+    site_budget: int | None = None,
     candidate_ids: tuple[str, ...] = (),
     design_source: Path | None = None,
     target_cluster_ids: tuple[str, ...] = (),
@@ -413,6 +421,10 @@ def execute(
         if run_dir is None:
             raise RuntimeError("validation control-run requires run_dir")
         return validation_control_run(config=config, run_dir=run_dir)
+    if (group, command) == ("validation", "control-analyze"):
+        if run_dir is None:
+            raise RuntimeError("validation control-analyze requires run_dir")
+        return validation_control_analyze(config=config, run_dir=run_dir)
     if (group, command) == ("validation", "replication-plan"):
         if run_id is None or target_id is None:
             raise RuntimeError("validation replication-plan requires run_id and target")
@@ -452,6 +464,48 @@ def execute(
         if run_dir is None:
             raise RuntimeError("validation handoff-run requires run_dir")
         return validation_handoff_run(config=config, run_dir=run_dir)
+    if (group, command) == ("validation", "qualification-handoff-plan"):
+        if run_id is None or qualification_source is None or site_budget is None:
+            raise RuntimeError(
+                "validation qualification-handoff-plan requires run_id, "
+                "qualification_run, and site_budget"
+            )
+        return validation_qualification_handoff_plan(
+            config=config,
+            qualification_run=qualification_source,
+            run_id=run_id,
+            site_budget=site_budget,
+        )
+    if (group, command) == ("validation", "qualification-handoff-run"):
+        if run_dir is None:
+            raise RuntimeError("validation qualification-handoff-run requires run_dir")
+        return validation_qualification_handoff_run(config=config, run_dir=run_dir)
+    if (group, command) == ("validation", "qualification-refinement-plan"):
+        if run_id is None or refinement_source is None or control_run is None:
+            raise RuntimeError(
+                "validation qualification-refinement-plan requires run_id, "
+                "source_run, and control_run"
+            )
+        return validation_qualification_refinement_plan(
+            config=config,
+            source_run=refinement_source,
+            control_run=control_run,
+            run_id=run_id,
+        )
+    if (group, command) == ("validation", "qualification-refinement-run"):
+        if run_dir is None:
+            raise RuntimeError(
+                "validation qualification-refinement-run requires run_dir"
+            )
+        return validation_qualification_refinement_run(config=config, run_dir=run_dir)
+    if (group, command) == ("validation", "qualification-refinement-analyze"):
+        if run_dir is None:
+            raise RuntimeError(
+                "validation qualification-refinement-analyze requires run_dir"
+            )
+        return validation_qualification_refinement_analyze(
+            config=config, run_dir=run_dir
+        )
     if (group, command) == ("validation", "guided-plan"):
         if run_id is None:
             raise RuntimeError("validation guided-plan requires run_id")

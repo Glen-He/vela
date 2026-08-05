@@ -45,8 +45,29 @@ def vela_software_identity() -> dict[str, JsonValue]:
     }
 
 
+def is_vela_software_identity(raw: object) -> bool:
+    """判断任意历史 Vela 软件身份是否具有完整格式。"""
+    match raw:
+        case {
+            "vela_version": str(recorded_version),
+            "vela_source_sha256": str(recorded_source_sha256),
+        }:
+            return (
+                bool(recorded_version)
+                and len(recorded_source_sha256) == 64
+                and all(
+                    character in "0123456789abcdef"
+                    for character in recorded_source_sha256
+                )
+            )
+        case _:
+            return False
+
+
 def is_current_vela_software(raw: object) -> bool:
     """判断记录的软件身份是否与当前源码完全一致。"""
+    if not is_vela_software_identity(raw):
+        return False
     current = vela_software_identity()
     match raw:
         case {

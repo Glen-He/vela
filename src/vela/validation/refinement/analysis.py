@@ -71,7 +71,7 @@ def _manifest_tasks(
         run_dir / "refinement_manifest.json", name="refinement manifest"
     )
     if (
-        manifest.get("schema") != "vela.validation-refinement-manifest/1"
+        manifest.get("schema") != "vela.validation-refinement-manifest/2"
         or manifest.get("stage") != "validation_local_refinement"
         or manifest.get("status") != "completed"
         or manifest.get("evidence_category") != plan.get("evidence_category")

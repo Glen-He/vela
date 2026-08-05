@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import io
-import math
 import statistics
 from collections import defaultdict
 from dataclasses import dataclass
@@ -21,6 +20,7 @@ from vela.design.finalists.evidence import (
     CandidateEvidence,
     FinalistDecoy,
     PairedSummary,
+    StateSummary,
     candidate_evidence,
     manifest_results,
     paired_summaries,
@@ -65,11 +65,80 @@ def _representative(
     return min(
         passed,
         key=lambda item: (
-            abs(item.ranking_score - ranking_median),
-            item.interface_score,
+            abs(item.metrics.reweighted_sc - ranking_median),
+            item.metrics.I_sc,
             item.decoy_id,
         ),
     )
+
+
+def _dominates(first: CandidateEvidence, second: CandidateEvidence) -> bool:
+    first_values = (
+        first.positive_ranking_median,
+        first.positive_peptide_median,
+        -first.successful_pair_fraction,
+    )
+    second_values = (
+        second.positive_ranking_median,
+        second.positive_peptide_median,
+        -second.successful_pair_fraction,
+    )
+    if any(value is None for value in (*first_values, *second_values)):
+        raise DesignError("eligible finalist lacks a Pareto objective")
+    return all(
+        left <= right
+        for left, right in zip(first_values, second_values, strict=True)
+        if left is not None and right is not None
+    ) and any(
+        left < right
+        for left, right in zip(first_values, second_values, strict=True)
+        if left is not None and right is not None
+    )
+
+
+def _pareto_resource_selection(
+    candidates: list[CandidateEvidence], *, budget: int
+) -> list[CandidateEvidence]:
+    """逐层选择非支配候选; 同层按位置覆盖和稳定身份截断。"""
+    remaining = list(candidates)
+    selected: list[CandidateEvidence] = []
+    position_coverage: dict[int, int] = defaultdict(int)
+    while remaining and len(selected) < budget:
+        front = [
+            candidate
+            for candidate in remaining
+            if not any(
+                _dominates(other, candidate)
+                for other in remaining
+                if other is not candidate
+            )
+        ]
+        front.sort(
+            key=lambda item: (
+                max(
+                    (
+                        position_coverage[position]
+                        for position in item.candidate.mutation_positions
+                    ),
+                    default=0,
+                ),
+                sum(
+                    position_coverage[position]
+                    for position in item.candidate.mutation_positions
+                ),
+                item.candidate.mutation_positions,
+                item.candidate.candidate_id,
+            )
+        )
+        for candidate in front[: budget - len(selected)]:
+            selected.append(candidate)
+            for position in candidate.candidate.mutation_positions:
+                position_coverage[position] += 1
+        front_ids = {item.candidate.candidate_id for item in front}
+        remaining = [
+            item for item in remaining if item.candidate.candidate_id not in front_ids
+        ]
+    return selected
 
 
 def _md_queue(
@@ -77,24 +146,13 @@ def _md_queue(
     config: AppConfig,
     plan: FinalistPlan,
     evidence: tuple[CandidateEvidence, ...],
-    decoys: tuple[FinalistDecoy, ...],
+    states: tuple[StateSummary, ...],
+    pairs: tuple[PairedSummary, ...],
 ) -> tuple[list[dict[str, str]], dict[str, str]]:
     eligible = [item for item in evidence if item.status == "eligible"]
-    eligible.sort(
-        key=lambda item: (
-            item.positive_ranking_worst
-            if item.positive_ranking_worst is not None
-            else math.inf,
-            item.positive_interface_worst
-            if item.positive_interface_worst is not None
-            else math.inf,
-            item.positive_ranking_median
-            if item.positive_ranking_median is not None
-            else math.inf,
-            item.candidate.candidate_id,
-        )
+    selected = _pareto_resource_selection(
+        eligible, budget=config.design.finalists.max_md_candidates
     )
-    selected = eligible[: config.design.finalists.max_md_candidates]
     selected_ids = {item.candidate.candidate_id for item in selected}
     resource_status = {
         item.candidate.candidate_id: (
@@ -104,17 +162,21 @@ def _md_queue(
         )
         for item in eligible
     }
-    by_candidate_template: dict[tuple[str, str], list[FinalistDecoy]] = defaultdict(
-        list
-    )
-    for decoy in decoys:
-        if decoy.task.start.state == "mutant":
-            by_candidate_template[
-                (
-                    decoy.task.start.candidate.candidate_id,
-                    decoy.task.start.template.template_id,
-                )
-            ].append(decoy)
+    cluster_by_id = {
+        cluster.cluster_id: cluster
+        for state in states
+        for cluster in state.pose_clusters
+    }
+    matched_clusters: dict[tuple[str, str], list[FinalistDecoy]] = defaultdict(list)
+    for pair in pairs:
+        if pair.mutant_pose_cluster_id is None:
+            continue
+        cluster = cluster_by_id.get(pair.mutant_pose_cluster_id)
+        if cluster is None:
+            raise DesignError("matched finalist pose cluster is missing")
+        matched_clusters[(pair.candidate.candidate_id, pair.template_id)].append(
+            cluster.medoid
+        )
     rows: list[dict[str, str]] = []
     for template in plan.templates:
         rows.append(
@@ -135,14 +197,15 @@ def _md_queue(
         )
     for item in selected:
         for template in plan.templates:
-            members = by_candidate_template[
+            passed = matched_clusters[
                 (item.candidate.candidate_id, template.template_id)
             ]
-            passed = [member for member in members if member.geometry.passed]
             if not passed:
-                raise DesignError("MD-selected candidate lacks a passed template pose")
-            median = float(statistics.median(member.ranking_score for member in passed))
-            representative = _representative(members, ranking_median=median)
+                raise DesignError("MD-selected candidate lacks a matched template pose")
+            median = float(
+                statistics.median(member.metrics.reweighted_sc for member in passed)
+            )
+            representative = _representative(passed, ranking_median=median)
             rows.append(
                 {
                     "system_id": (
@@ -182,8 +245,7 @@ def _decoy_rows(
             "target": item.task.start.template.target,
             "evidence_role": item.task.start.template.evidence_role,
             "seed": str(item.task.seed),
-            "ranking_score": f"{item.ranking_score:.6f}",
-            "interface_score": f"{item.interface_score:.6f}",
+            **{name: f"{value:.6f}" for name, value in item.metrics.as_dict().items()},
             "qc_status": "passed" if item.geometry.passed else "failed",
             "interface_contact_pairs": str(item.geometry.interface_contact_pairs),
             "interface_receptor_residues": str(
@@ -216,8 +278,12 @@ def _pair_rows(pairs: tuple[PairedSummary, ...]) -> list[dict[str, str]]:
             "wt_passed_fraction": f"{item.wt_passed_fraction:.6f}",
             "mutant_passed_fraction": f"{item.mutant_passed_fraction:.6f}",
             "successful": str(item.successful).lower(),
-            "ranking_delta": _number(item.ranking_delta),
-            "interface_delta": _number(item.interface_delta),
+            "pose_relation": item.pose_relation,
+            "wt_pose_cluster_id": item.wt_pose_cluster_id or "",
+            "mutant_pose_cluster_id": item.mutant_pose_cluster_id or "",
+            "paired_reweighted_sc_delta_REU": _number(item.paired_reweighted_sc_delta),
+            "paired_I_sc_delta_REU": _number(item.paired_I_sc_delta),
+            "paired_pep_sc_delta_REU": _number(item.paired_pep_sc_delta),
         }
         for item in pairs
     ]
@@ -254,6 +320,8 @@ def _candidate_rows(
                 "positive_ranking_worst": _number(item.positive_ranking_worst),
                 "positive_interface_median": _number(item.positive_interface_median),
                 "positive_interface_worst": _number(item.positive_interface_worst),
+                "positive_peptide_median": _number(item.positive_peptide_median),
+                "successful_pair_fraction": f"{item.successful_pair_fraction:.6f}",
                 "candidate_status": item.status,
                 "failed_gates": ";".join(item.failed_gates),
                 "resource_status": resource_status.get(
@@ -264,17 +332,44 @@ def _candidate_rows(
     return rows
 
 
+def _pose_cluster_rows(states: tuple[StateSummary, ...]) -> list[dict[str, str]]:
+    return [
+        {
+            "pose_cluster_id": cluster.cluster_id,
+            "task_id": state.task.task_id,
+            "state": state.task.start.state,
+            "candidate_id": state.task.start.candidate.candidate_id,
+            "template_id": state.task.start.template.template_id,
+            "seed": str(state.task.seed),
+            "cluster_size": str(len(cluster.members)),
+            "cluster_fraction_of_qc_passed": (
+                f"{len(cluster.members) / config_count:.6f}"
+            ),
+            "medoid_decoy_id": cluster.medoid.decoy_id,
+            "median_reweighted_sc_REU": f"{cluster.ranking_median:.6f}",
+            "median_I_sc_REU": f"{cluster.interface_median:.6f}",
+            "median_pep_sc_REU": f"{cluster.peptide_median:.6f}",
+            "primary": str(cluster.cluster_id == state.primary_pose_cluster_id).lower(),
+        }
+        for state in states
+        for config_count in (sum(len(item.members) for item in state.pose_clusters),)
+        for cluster in state.pose_clusters
+    ]
+
+
 def _write_reports(
     *,
     run_dir: Path,
     output_dir: Path,
     decoys: tuple[FinalistDecoy, ...],
+    states: tuple[StateSummary, ...],
     pairs: tuple[PairedSummary, ...],
     evidence: tuple[CandidateEvidence, ...],
     queue_rows: list[dict[str, str]],
     resource_status: dict[str, str],
-) -> tuple[Path, Path, Path, Path]:
+) -> tuple[Path, Path, Path, Path, Path]:
     decoy_path = output_dir / "decoys.tsv"
+    cluster_path = output_dir / "pose_clusters.tsv"
     pair_path = output_dir / "paired_seed_summary.tsv"
     candidate_path = output_dir / "candidate_summary.tsv"
     queue_path = output_dir / "md_queue.tsv"
@@ -291,8 +386,15 @@ def _write_reports(
                 "target",
                 "evidence_role",
                 "seed",
-                "ranking_score",
-                "interface_score",
+                "reweighted_sc",
+                "I_sc",
+                "pep_sc",
+                "pep_sc_noref",
+                "I_bsa_A2",
+                "I_hb",
+                "I_pack",
+                "I_unsat",
+                "disulfide_score",
                 "qc_status",
                 "interface_contact_pairs",
                 "interface_receptor_residues",
@@ -304,6 +406,27 @@ def _write_reports(
                 "sha256",
             ),
             _decoy_rows(decoys=decoys, run_dir=run_dir),
+        ),
+    )
+    atomic_write_text(
+        cluster_path,
+        _tsv(
+            (
+                "pose_cluster_id",
+                "task_id",
+                "state",
+                "candidate_id",
+                "template_id",
+                "seed",
+                "cluster_size",
+                "cluster_fraction_of_qc_passed",
+                "medoid_decoy_id",
+                "median_reweighted_sc_REU",
+                "median_I_sc_REU",
+                "median_pep_sc_REU",
+                "primary",
+            ),
+            _pose_cluster_rows(states),
         ),
     )
     atomic_write_text(
@@ -319,8 +442,12 @@ def _write_reports(
                 "wt_passed_fraction",
                 "mutant_passed_fraction",
                 "successful",
-                "ranking_delta",
-                "interface_delta",
+                "pose_relation",
+                "wt_pose_cluster_id",
+                "mutant_pose_cluster_id",
+                "paired_reweighted_sc_delta_REU",
+                "paired_I_sc_delta_REU",
+                "paired_pep_sc_delta_REU",
             ),
             _pair_rows(pairs),
         ),
@@ -347,6 +474,8 @@ def _write_reports(
                 "positive_ranking_worst",
                 "positive_interface_median",
                 "positive_interface_worst",
+                "positive_peptide_median",
+                "successful_pair_fraction",
                 "candidate_status",
                 "failed_gates",
                 "resource_status",
@@ -374,7 +503,7 @@ def _write_reports(
             queue_rows,
         ),
     )
-    return decoy_path, pair_path, candidate_path, queue_path
+    return decoy_path, cluster_path, pair_path, candidate_path, queue_path
 
 
 def analyze_finalists(*, config: AppConfig, run_dir: Path) -> FinalistAnalysisOutcome:
@@ -398,15 +527,20 @@ def analyze_finalists(*, config: AppConfig, run_dir: Path) -> FinalistAnalysisOu
         state_summary(config=config, task=task, decoys=tuple(by_task[task.task_id]))
         for task in plan.tasks
     )
-    pairs = paired_summaries(states)
+    pairs = paired_summaries(config=config, states=states)
     evidence = candidate_evidence(config=config, pairs=pairs)
     queue_rows, resource_status = _md_queue(
-        config=config, plan=plan, evidence=evidence, decoys=decoys
+        config=config,
+        plan=plan,
+        evidence=evidence,
+        states=states,
+        pairs=pairs,
     )
-    decoy_path, pair_path, candidate_path, queue_path = _write_reports(
+    decoy_path, cluster_path, pair_path, candidate_path, queue_path = _write_reports(
         run_dir=run_dir,
         output_dir=output_dir,
         decoys=decoys,
+        states=states,
         pairs=pairs,
         evidence=evidence,
         queue_rows=queue_rows,
@@ -447,6 +581,11 @@ def analyze_finalists(*, config: AppConfig, run_dir: Path) -> FinalistAnalysisOu
                 "sha256": sha256_file(pair_path),
                 "count": len(pairs),
                 "successful_count": sum(item.successful for item in pairs),
+            },
+            "pose_clusters": {
+                "path": cluster_path.name,
+                "sha256": sha256_file(cluster_path),
+                "count": sum(len(state.pose_clusters) for state in states),
             },
             "candidate_summary": {
                 "path": candidate_path.name,

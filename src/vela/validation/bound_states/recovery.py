@@ -42,8 +42,23 @@ class RecoveryCluster:
     members: tuple[ControlDecoy, ...]
 
     @property
-    def representative(self) -> ControlDecoy:
+    def energy_representative(self) -> ControlDecoy:
+        """返回用于分数排序的最低能量成员。"""
         return self.members[0]
+
+    @property
+    def geometric_medoid(self) -> ControlDecoy:
+        """返回到簇内其他成员总骨架 RMSD 最小的几何代表。"""
+        return min(
+            self.members,
+            key=lambda candidate: (
+                sum(
+                    _backbone_rmsd(candidate.peptide_backbone, member.peptide_backbone)
+                    for member in self.members
+                ),
+                candidate.decoy_id,
+            ),
+        )
 
     @property
     def seeds(self) -> tuple[int, ...]:
@@ -64,7 +79,10 @@ class RecoveryCluster:
             )
         )
 
-    def recovered_representative(self, *, max_recovery_rmsd_A: float) -> ControlDecoy:
+    def recovered_energy_representative(
+        self, *, max_recovery_rmsd_A: float
+    ) -> ControlDecoy:
+        """返回近天然成员中用于证明排序能力的最低能量模型。"""
         recovered = tuple(
             member
             for member in self.members
@@ -87,7 +105,8 @@ class BatchRecoveryAssessment:
     ranking_success: bool
     selected_cluster_rank: int | None
     selected_cluster_seed_support: int
-    selected_representative: ControlDecoy | None
+    selected_energy_representative: ControlDecoy | None
+    selected_geometric_medoid: ControlDecoy | None
     decoy_table_path: Path
     cluster_table_path: Path
 
@@ -288,7 +307,8 @@ def _write_batch_tables(
         "near_native",
         "supported",
         "in_ranking_window",
-        "representative_decoy_id",
+        "energy_representative_decoy_id",
+        "geometric_medoid_decoy_id",
     )
     cluster_rows = [
         {
@@ -308,7 +328,9 @@ def _write_batch_tables(
                     )
                 )
             ),
-            "best_ranking_score": f"{cluster.representative.ranking_score:.6f}",
+            "best_ranking_score": (
+                f"{cluster.energy_representative.ranking_score:.6f}"
+            ),
             "minimum_recovery_rmsd_A": f"{cluster.minimum_recovery_rmsd_A:.6f}",
             "near_native": str(
                 cluster.minimum_recovery_rmsd_A <= control.max_recovery_rmsd_A
@@ -322,7 +344,8 @@ def _write_batch_tables(
                 >= control.min_cluster_seed_support
             ).lower(),
             "in_ranking_window": str(cluster.rank <= control.top_clusters).lower(),
-            "representative_decoy_id": cluster.representative.decoy_id,
+            "energy_representative_decoy_id": (cluster.energy_representative.decoy_id),
+            "geometric_medoid_decoy_id": cluster.geometric_medoid.decoy_id,
         }
         for cluster in clusters
     ]
@@ -390,12 +413,15 @@ def _assess_batch(
             if selected is not None
             else 0
         ),
-        selected_representative=(
-            selected.recovered_representative(
+        selected_energy_representative=(
+            selected.recovered_energy_representative(
                 max_recovery_rmsd_A=control.max_recovery_rmsd_A
             )
             if selected is not None
             else None
+        ),
+        selected_geometric_medoid=(
+            selected.geometric_medoid if selected is not None else None
         ),
         decoy_table_path=decoy_path,
         cluster_table_path=cluster_path,
@@ -403,7 +429,11 @@ def _assess_batch(
 
 
 def analyze_control_recovery(
-    *, control: LocalRecoveryControl, tasks: tuple[ControlTask, ...], run_dir: Path
+    *,
+    control: LocalRecoveryControl,
+    tasks: tuple[ControlTask, ...],
+    run_dir: Path,
+    output_dir: Path | None = None,
 ) -> tuple[bool, dict[str, JsonValue]]:
     """合并每批全部 seed; 要求两个完整预算批次重复恢复同一姿态。"""
     expected_tasks = {
@@ -417,30 +447,34 @@ def analyze_control_recovery(
             f"control task matrix is incomplete or duplicated: {control.control_id}"
         )
     native_receptor_ca, _ = _alignment_coordinates(tasks[0].control_input.complex_path)
-    output_dir = run_dir / "analysis" / control.control_id
-    output_dir.mkdir(parents=True, exist_ok=False)
+    control_output_dir = (
+        output_dir / control.control_id
+        if output_dir is not None
+        else run_dir / "analysis" / control.control_id
+    )
+    control_output_dir.mkdir(parents=True, exist_ok=False)
     batches = tuple(
         _assess_batch(
             control=control,
             batch_id=batch_id,
             tasks=tuple(task for task in tasks if task.batch_id == batch_id),
             run_dir=run_dir,
-            output_dir=output_dir,
+            output_dir=control_output_dir,
             native_receptor_ca=native_receptor_ca,
         )
         for batch_id in tuple(dict.fromkeys(task.batch_id for task in tasks))
     )
-    representatives = tuple(
-        batch.selected_representative
+    geometric_medoids = tuple(
+        batch.selected_geometric_medoid
         for batch in batches
-        if batch.selected_representative is not None
+        if batch.selected_geometric_medoid is not None
     )
     pairwise_rmsd = tuple(
         _backbone_rmsd(first.peptide_backbone, second.peptide_backbone)
-        for first_index, first in enumerate(representatives)
-        for second in representatives[first_index + 1 :]
+        for first_index, first in enumerate(geometric_medoids)
+        for second in geometric_medoids[first_index + 1 :]
     )
-    pose_consistent = len(representatives) == len(batches) and all(
+    pose_consistent = len(geometric_medoids) == len(batches) and all(
         value <= control.max_batch_pose_rmsd_A for value in pairwise_rmsd
     )
     passed = (
@@ -468,9 +502,14 @@ def analyze_control_recovery(
                 "ranking_success": batch.ranking_success,
                 "selected_cluster_rank": batch.selected_cluster_rank,
                 "selected_cluster_seed_support": batch.selected_cluster_seed_support,
-                "selected_representative_decoy_id": (
-                    batch.selected_representative.decoy_id
-                    if batch.selected_representative is not None
+                "selected_energy_representative_decoy_id": (
+                    batch.selected_energy_representative.decoy_id
+                    if batch.selected_energy_representative is not None
+                    else None
+                ),
+                "selected_geometric_medoid_decoy_id": (
+                    batch.selected_geometric_medoid.decoy_id
+                    if batch.selected_geometric_medoid is not None
                     else None
                 ),
                 "decoy_table": {

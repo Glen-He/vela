@@ -18,14 +18,19 @@ from vela.core.provenance import (
     vela_software_identity,
 )
 from vela.core.run_identity import validate_run_id
-from vela.validation.bound_states.assets import PEPTIDE_CHAIN, RECEPTOR_CHAIN
+from vela.preparation.chemistry import ChemistryDefinition
+from vela.validation.bound_states.assets import (
+    PEPTIDE_CHAIN,
+    RECEPTOR_CHAIN,
+    standard_peptide_chemistry,
+)
 from vela.validation.models import (
     BoundStateDefinition,
     LocalRecoveryControl,
     ValidationError,
 )
 from vela.validation.readiness import assess_validation_readiness
-from vela.validation.rosetta import verify_flexpepdock_tool
+from vela.validation.rosetta import verify_rosetta_scripts_tool
 
 PLAN_NAME = "qualification_plan.json"
 
@@ -37,6 +42,8 @@ class ControlInput:
     definition: BoundStateDefinition
     complex_path: Path
     disulfide_path: Path
+    chemistry: ChemistryDefinition
+    receptor_residue_count: int
     fixed_histidine_pose_indices: tuple[int, ...]
 
 
@@ -120,6 +127,8 @@ def inspect_control_input(
         definition=definition,
         complex_path=complex_path,
         disulfide_path=disulfide_path,
+        chemistry=standard_peptide_chemistry(definition),
+        receptor_residue_count=receptor_count,
         fixed_histidine_pose_indices=tuple(
             receptor_count + item.position for item in definition.histidines
         ),
@@ -203,7 +212,7 @@ def write_qualification_plan(*, config: AppConfig, run_id: str) -> Qualification
     if run_dir.exists():
         raise ValidationError(f"qualification run directory already exists: {run_dir}")
     tasks = build_control_tasks(config)
-    tool = verify_flexpepdock_tool(config.validation.rosetta)
+    tool = verify_rosetta_scripts_tool(config.validation.rosetta)
     snapshot_path = run_dir / "config.snapshot.txt"
     atomic_write_text(snapshot_path, config.source_snapshot_text)
     preparation_manifest = (
@@ -239,7 +248,7 @@ def write_qualification_plan(*, config: AppConfig, run_id: str) -> Qualification
     atomic_write_json(
         run_dir / PLAN_NAME,
         {
-            "schema": "vela.validation-qualification-plan/1",
+            "schema": "vela.validation-qualification-plan/2",
             "stage": "validation_qualification",
             "status": "planned",
             "run_id": run_id,
@@ -250,7 +259,7 @@ def write_qualification_plan(*, config: AppConfig, run_id: str) -> Qualification
             "software": {
                 **vela_software_identity(),
                 "rosetta_version": tool.version,
-                "flexpepdock_sha256": tool.executable_sha256,
+                "rosetta_scripts_sha256": tool.executable_sha256,
             },
             "inputs": {
                 "config_snapshot": {

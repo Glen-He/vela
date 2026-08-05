@@ -151,14 +151,20 @@ def test_resolved_method_status_requires_report_and_hash(
     config_dir = tmp_path / "configs"
     _copy_project_config(config_dir)
     path = config_dir / filename
-    path.write_text(
-        path.read_text(encoding="utf-8").replace(
+    text = path.read_text(encoding="utf-8")
+    if filename == "validation.toml":
+        text = text.replace(
             'qualification_status = "unresolved"',
             'qualification_status = "failed"',
             1,
-        ),
-        encoding="utf-8",
-    )
+        )
+    else:
+        text = text.replace(
+            'qualification_status = "unresolved"',
+            'qualification_status = "failed"',
+            1,
+        )
+    path.write_text(text, encoding="utf-8")
 
     with pytest.raises(error_type, match="requires a report and SHA-256"):
         load_config(config_dir)

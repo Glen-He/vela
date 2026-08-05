@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from vela.core.provenance import sha256_file
+from vela.core.provenance import is_current_vela_software, sha256_file
 from vela.core.typed_data import object_mapping
 from vela.discovery.models import (
     DiscoverySettings,
@@ -121,10 +121,6 @@ def _method_issues(
         try:
             raw: object = json.loads(report.read_text(encoding="utf-8"))
             document = object_mapping(raw, name="qualification report")
-            recommended = object_mapping(
-                document.get("recommended_target_config"),
-                name="recommended target config",
-            )
         except (
             UnicodeDecodeError,
             json.JSONDecodeError,
@@ -137,19 +133,37 @@ def _method_issues(
                 )
             )
         else:
-            expected = {
-                "qualification_status": "qualified",
-                "contact_jaccard_distance": (target.analysis.contact_jaccard_distance),
-                "position_distance_A": target.analysis.position_distance_A,
-                "min_seed_support": target.analysis.min_seed_support,
-                "min_receptor_support": target.analysis.min_receptor_support,
-            }
-            if (
+            identity_mismatch = (
                 document.get("schema") != REPORT_SCHEMA
-                or document.get("status") != "qualified"
+                or document.get("status") != target.qualification_status
                 or document.get("target_id") != target.target_id
-                or any(recommended.get(key) != value for key, value in expected.items())
-            ):
+                or not is_current_vela_software(document.get("analysis_software"))
+            )
+            recommendation_mismatch = (
+                document.get("recommended_target_config") is not None
+            )
+            if target.qualification_status == "qualified":
+                try:
+                    recommended = object_mapping(
+                        document.get("recommended_target_config"),
+                        name="recommended target config",
+                    )
+                except TypeError:
+                    recommendation_mismatch = True
+                else:
+                    expected = {
+                        "qualification_status": "qualified",
+                        "contact_jaccard_distance": (
+                            target.analysis.contact_jaccard_distance
+                        ),
+                        "position_distance_A": target.analysis.position_distance_A,
+                        "min_seed_support": target.analysis.min_seed_support,
+                        "min_receptor_support": target.analysis.min_receptor_support,
+                    }
+                    recommendation_mismatch = any(
+                        recommended.get(key) != value for key, value in expected.items()
+                    )
+            if identity_mismatch or recommendation_mismatch:
                 issues.append(
                     ReadinessIssue(
                         "qualification_report_mismatch",

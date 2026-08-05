@@ -20,22 +20,19 @@ from vela.design.sequence.neighborhood import (
 from vela.validation.records import read_document, validate_record
 
 
-def _candidate_statuses(path: Path) -> dict[str, tuple[str, str]]:
+def _candidate_statuses(path: Path) -> dict[str, str]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        required = {"candidate_id", "candidate_status", "resource_status"}
+        required = {"candidate_id", "candidate_status"}
         if reader.fieldnames is None or not required.issubset(reader.fieldnames):
             raise DesignError("iteration parent summary columns are invalid")
         rows = tuple(dict(row) for row in reader)
-    statuses: dict[str, tuple[str, str]] = {}
+    statuses: dict[str, str] = {}
     for row in rows:
         candidate_id = row["candidate_id"]
         if not candidate_id or candidate_id in statuses:
             raise DesignError("iteration parent summary identities are invalid")
-        statuses[candidate_id] = (
-            row["candidate_status"],
-            row["resource_status"],
-        )
+        statuses[candidate_id] = row["candidate_status"]
     if not statuses:
         raise DesignError("iteration parent summary is empty")
     return statuses
@@ -44,7 +41,7 @@ def _candidate_statuses(path: Path) -> dict[str, tuple[str, str]]:
 def _selected_parents(
     *,
     candidates: tuple[SequenceCandidate, ...],
-    statuses: dict[str, tuple[str, str]],
+    statuses: dict[str, str],
     parent_candidate_ids: tuple[str, ...],
     max_parents: int,
 ) -> tuple[SequenceCandidate, ...]:
@@ -65,11 +62,8 @@ def _selected_parents(
             raise DesignError(
                 f"iteration parent is absent from its finalist run: {candidate_id}"
             )
-        if status != ("eligible", "md_selected"):
-            raise DesignError(
-                "iteration parent must be eligible and selected for Stage 5 review: "
-                f"{candidate_id}"
-            )
+        if status != "eligible":
+            raise DesignError(f"iteration parent must be eligible: {candidate_id}")
         selected.append(candidate)
     if len({item.generation for item in selected}) != 1:
         raise DesignError("iteration parents must belong to the same generation")
@@ -127,7 +121,7 @@ def write_iteration_screen_plan(
     source_inputs: dict[str, JsonValue] = {
         "parent_finalist": {
             "path": source_path.as_posix(),
-            "selection_basis": "explicit_md_queue_candidate_ids",
+            "selection_basis": "explicit_iteration_parent_candidate_ids",
             "selected_parent_candidate_ids": [item.candidate_id for item in parents],
             "finalist_plan_sha256": sha256_file(source / "finalist_plan.json"),
             "finalist_manifest_sha256": sha256_file(source / "finalist_manifest.json"),
