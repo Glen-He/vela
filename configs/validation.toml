@@ -1,9 +1,9 @@
 [validation]
-# 阶段三先完成工具和方法阳性对照资格，不能用未校准阈值筛选 P15。
+# 4IB5/Pc matched-receptor 两个独立 4x128 批次已证明局部精修能力。
 method_id = "flexpepdock-local-refine-disulfide"
-qualification_status = "unresolved"
-qualification_report = "unresolved"
-qualification_report_sha256 = "unresolved"
+qualification_status = "qualified"
+qualification_report = "../outputs/validation/controls/4ib5-pc-chemistry-aware-local-control-20260804/qualification_analysis/qualification_report.json"
+qualification_report_sha256 = "7178466b69e4c0223ac05991a62316ca225dcd01c76381dc968cef10e173911a"
 # 正式局部精修对每个起始姿态使用 4 条独立随机流。
 seeds = [120623, 120624, 120625, 120626]
 
@@ -25,6 +25,25 @@ package_metadata = "/home/glen/apps/cabsflex/.venv-cg2all/lib/python3.9/site-pac
 checkpoint = "/home/glen/apps/cabsflex/.venv-cg2all/lib/python3.9/site-packages/cg2all/model/CalphaSCModel.ckpt"
 checkpoint_sha256 = "6c4e5c96ff69bf45d6a2f876021b8e4afea4101ccdbcc9376ff1e61622691ea1"
 expected_version = "1.2.0"
+
+[validation.handoff]
+# 每个 site 覆盖两个主要姿态簇的中心与几何边缘；seed 多样性仅作同分排序，不是硬门槛。
+poses_per_receptor_site = 4
+
+[validation.analysis]
+# 这些门槛只检查全原子界面完整性、起点位点保持和跨随机流重复性，不把它们解释为
+# native pose 判别器。数值冻结自 4IB5/Pc 两个独立 4x128 批次及其分层几何审计。
+min_interface_contact_pairs = 10
+min_interface_receptor_residues = 3
+max_receptor_ca_rmsd_A = 1.0
+min_start_contact_overlap = 0.2
+max_start_site_displacement_A = 6.0
+max_cluster_backbone_rmsd_A = 2.0
+min_heavy_atom_distance_A = 1.2
+min_refinement_seed_support = 2
+min_refinement_start_support = 2
+# blind 候选的支持簇还必须来自至少两条独立 CABS 随机流，避免同轨迹伪重复。
+min_refinement_source_seed_support = 2
 
 [[validation.bound_states]]
 state_id = "4IB5_A_D"

@@ -7,7 +7,10 @@ from pathlib import Path
 
 from vela.core.provenance import is_current_vela_software, sha256_file
 from vela.core.typed_data import object_list, object_mapping
-from vela.discovery.analysis.clustering import analyze_sites
+from vela.discovery.analysis.clustering import (
+    analyze_sites,
+    candidate_analysis_contract,
+)
 from vela.discovery.analysis.pose_table import read_pose_evidence
 from vela.discovery.analysis.reports import write_site_reports
 from vela.discovery.models import DiscoveryError, SiteAnalysisSettings
@@ -94,7 +97,7 @@ def _completed_tasks(run_dir: Path) -> tuple[dict[str, TaskIdentity], str, str]:
         or not is_current_vela_software(plan.get("software"))
     ):
         raise DiscoveryError("run manifest has an invalid blind evidence category")
-    if plan.get("schema") != "vela.discovery-run-manifest/5":
+    if plan.get("schema") != "vela.discovery-run-manifest/8":
         raise DiscoveryError("discovery run manifest schema is invalid")
     planned_tasks = _task_identities(
         plan, status_field="status", required_status="planned"
@@ -119,7 +122,7 @@ def _completed_tasks(run_dir: Path) -> tuple[dict[str, TaskIdentity], str, str]:
         value = software.get(field)
         if not isinstance(value, str) or not value.strip():
             raise DiscoveryError(f"sampling manifest must record {field}")
-    if sampling.get("schema") != "vela.discovery-sampling-manifest/5":
+    if sampling.get("schema") != "vela.discovery-sampling-manifest/7":
         raise DiscoveryError("sampling manifest schema is invalid")
     completed_tasks = _task_identities(
         sampling, status_field="execution_status", required_status="completed"
@@ -144,6 +147,13 @@ def analyze_discovery_run(*, run_dir: Path, settings: SiteAnalysisSettings) -> N
     """确认正式任务完整后生成单受体和跨构象 site 报告。"""
     resolved_run_dir = run_dir.resolve()
     tasks, evidence_category, _ = _completed_tasks(resolved_run_dir)
+    plan = _document(
+        resolved_run_dir / "run_manifest.json", name="discovery run manifest"
+    )
+    if plan.get("analysis_contract") != candidate_analysis_contract(settings):
+        raise DiscoveryError(
+            "current candidate analysis contract differs from the frozen run"
+        )
     pose_table = resolved_run_dir / "pose_evidence.tsv"
     poses = read_pose_evidence(path=pose_table, run_dir=resolved_run_dir)
     observed_tasks: set[str] = set()
@@ -174,4 +184,5 @@ def analyze_discovery_run(*, run_dir: Path, settings: SiteAnalysisSettings) -> N
         pose_table=pose_table,
         output_dir=resolved_run_dir / "site_analysis",
         evidence_category=evidence_category,
+        settings=settings,
     )

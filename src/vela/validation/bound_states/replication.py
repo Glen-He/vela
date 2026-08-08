@@ -9,7 +9,11 @@ from vela.core.provenance import JsonValue, sha256_file
 from vela.core.typed_data import object_list, object_mapping
 from vela.discovery.models import DiscoveryError, DiscoveryTask
 from vela.discovery.readiness import assess_discovery_readiness
-from vela.discovery.sampling.planning import DiscoveryPlan, write_sampling_plan
+from vela.discovery.sampling.planning import (
+    DiscoveryPlan,
+    production_authorization,
+    write_sampling_plan,
+)
 from vela.validation.models import BoundStateDefinition, ValidationError
 from vela.validation.records import read_document, safe_identifier, validate_record
 
@@ -187,6 +191,9 @@ def write_replication_plan(
                     config.discovery.target(target_id).reference_receptor
                 ),
             },
+            method_authorization=production_authorization(
+                config=config, target_id=target_id
+            ),
             additional_inputs={
                 "bound_state_preparation_manifest": {
                     "path": manifest_path.relative_to(config.paths.data_dir).as_posix(),

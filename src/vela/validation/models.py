@@ -347,7 +347,7 @@ class Cg2AllSettings:
 
 @dataclass(frozen=True, slots=True)
 class CandidateHandoffSettings:
-    """受支持 candidate site 到局部精修起点的选择预算。"""
+    """预算内 candidate site 到局部精修起点的选择规则。"""
 
     poses_per_receptor_site: int
     chemistry_seed: int
@@ -367,6 +367,9 @@ class CandidateRefinementSettings:
     random_translation_A: float
     random_rotation_degrees: float
     ranking_score: str
+    receptor_backbone_contact_A: float
+    receptor_backbone_sequence_padding: int
+    seed_batch_sizes: tuple[int, int, int]
 
     def __post_init__(self) -> None:
         if self.prepack_seed < 0:
@@ -375,6 +378,65 @@ class CandidateRefinementSettings:
             raise ValidationError("refinement perturbations must not be negative")
         if not SCORE_TERM_PATTERN.fullmatch(self.ranking_score):
             raise ValidationError("refinement ranking_score is invalid")
+        if self.receptor_backbone_contact_A <= 0:
+            raise ValidationError(
+                "refinement receptor_backbone_contact_A must be positive"
+            )
+        if self.receptor_backbone_sequence_padding < 0:
+            raise ValidationError(
+                "refinement receptor_backbone_sequence_padding must not be negative"
+            )
+        if any(size < 1 for size in self.seed_batch_sizes):
+            raise ValidationError("refinement seed batch sizes must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class RefinementFunnelSettings:
+    """P15 探索性局部精修的逐级预算与证据门槛。"""
+
+    ensemble_screening_budget: int
+    conformation_specific_screening_budget: int
+    screening_promotion_budget: int
+    confirmation_promotion_budget: int
+    final_hypothesis_budget: int
+    screening_starts_per_receptor_site: int
+    source_pool_per_receptor_site: int
+    confirmation_min_task_cells: int
+    cross_receptor_max_backbone_rmsd_A: float
+    cross_receptor_min_contact_jaccard: float
+
+    def __post_init__(self) -> None:
+        positive = (
+            self.ensemble_screening_budget,
+            self.conformation_specific_screening_budget,
+            self.screening_promotion_budget,
+            self.confirmation_promotion_budget,
+            self.final_hypothesis_budget,
+            self.screening_starts_per_receptor_site,
+            self.source_pool_per_receptor_site,
+            self.confirmation_min_task_cells,
+        )
+        if any(value < 1 for value in positive):
+            raise ValidationError("refinement funnel integer settings must be positive")
+        if self.screening_starts_per_receptor_site != 2:
+            raise ValidationError("screening requires exactly two CABS source starts")
+        if self.source_pool_per_receptor_site < self.screening_starts_per_receptor_site:
+            raise ValidationError("source pool must cover the screening starts")
+        if self.screening_promotion_budget > (
+            self.ensemble_screening_budget + self.conformation_specific_screening_budget
+        ):
+            raise ValidationError("screening promotion budget exceeds its input budget")
+        if self.confirmation_promotion_budget > self.screening_promotion_budget:
+            raise ValidationError("confirmation promotion budget exceeds screening")
+        if self.final_hypothesis_budget > self.confirmation_promotion_budget:
+            raise ValidationError("final hypothesis budget exceeds confirmation")
+        task_cell_count = self.screening_starts_per_receptor_site * 2
+        if not 2 <= self.confirmation_min_task_cells <= task_cell_count:
+            raise ValidationError("confirmation task-cell threshold is invalid")
+        if self.cross_receptor_max_backbone_rmsd_A <= 0:
+            raise ValidationError("cross-receptor backbone RMSD must be positive")
+        if not 0.0 <= self.cross_receptor_min_contact_jaccard <= 1.0:
+            raise ValidationError("cross-receptor contact Jaccard must be in [0, 1]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,6 +452,7 @@ class ValidationAnalysisSettings:
     min_heavy_atom_distance_A: float | None
     min_refinement_seed_support: int | None
     min_refinement_start_support: int | None
+    min_refinement_source_seed_support: int | None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -412,6 +475,10 @@ class ValidationAnalysisSettings:
         for name, value in (
             ("min_refinement_seed_support", self.min_refinement_seed_support),
             ("min_refinement_start_support", self.min_refinement_start_support),
+            (
+                "min_refinement_source_seed_support",
+                self.min_refinement_source_seed_support,
+            ),
         ):
             if value is not None and value < 1:
                 raise ValidationError(f"{name} must be positive or unresolved")
@@ -437,6 +504,7 @@ class ValidationAnalysisSettings:
                 self.min_heavy_atom_distance_A,
                 self.min_refinement_seed_support,
                 self.min_refinement_start_support,
+                self.min_refinement_source_seed_support,
             )
         )
 
@@ -457,6 +525,7 @@ class ValidationSettings:
     cg2all: Cg2AllSettings
     handoff: CandidateHandoffSettings
     refinement: CandidateRefinementSettings
+    funnel: RefinementFunnelSettings
     analysis: ValidationAnalysisSettings
     bound_states: tuple[BoundStateDefinition, ...]
     local_controls: tuple[LocalRecoveryControl, ...]
@@ -497,6 +566,10 @@ class ValidationSettings:
         ):
             raise ValidationError(
                 "validation seeds must be unique non-negative integers"
+            )
+        if sum(self.refinement.seed_batch_sizes) != len(self.seeds):
+            raise ValidationError(
+                "refinement seed batches must partition all validation seeds"
             )
         if self.min_disulfide_sg_A <= 0:
             raise ValidationError("min_disulfide_sg_A must be positive")

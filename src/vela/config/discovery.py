@@ -153,15 +153,16 @@ def parse_discovery(
     qualification_keys = {
         "seeds",
         "control_bound_state_id",
-        "control_receptor_id",
+        "control_receptor_ids",
+        "benchmark_receptor_id",
         "control_target_id",
         "control_secondary_structure",
+        "receptor_site_diagnostic_budget",
         "max_native_ligand_rmsd_A",
         "max_native_site_centroid_distance_A",
         "min_native_receptor_contact_fraction",
-        "min_native_sampling_seed_support",
         "min_native_site_seed_support",
-        "min_selection_native_seed_recall_fraction",
+        "min_native_receptor_support",
         "topology_calibration_status",
         "topology_calibration_report",
         "topology_calibration_report_sha256",
@@ -205,6 +206,9 @@ def parse_discovery(
         "position_distance_A",
         "min_seed_support",
         "min_receptor_support",
+        "min_conformation_specific_seed_support",
+        "ensemble_candidate_budget",
+        "conformation_specific_candidate_budget",
     }
     parsed_targets: list[DiscoveryTargetSettings] = []
     for target_id, raw_target in sorted(targets.items()):
@@ -247,6 +251,19 @@ def parse_discovery(
                     ),
                     min_receptor_support=_optional_integer(
                         target, "min_receptor_support", path=target_path
+                    ),
+                    min_conformation_specific_seed_support=_optional_integer(
+                        target,
+                        "min_conformation_specific_seed_support",
+                        path=target_path,
+                    ),
+                    ensemble_candidate_budget=_optional_integer(
+                        target, "ensemble_candidate_budget", path=target_path
+                    ),
+                    conformation_specific_candidate_budget=_optional_integer(
+                        target,
+                        "conformation_specific_candidate_budget",
+                        path=target_path,
                     ),
                 ),
             )
@@ -378,9 +395,14 @@ def parse_discovery(
                 "control_bound_state_id",
                 path="discovery.qualification",
             ),
-            control_receptor_id=string(
+            control_receptor_ids=strings(
                 qualification,
-                "control_receptor_id",
+                "control_receptor_ids",
+                path="discovery.qualification",
+            ),
+            benchmark_receptor_id=string(
+                qualification,
+                "benchmark_receptor_id",
                 path="discovery.qualification",
             ),
             control_target_id=string(
@@ -391,6 +413,11 @@ def parse_discovery(
             control_secondary_structure=string(
                 qualification,
                 "control_secondary_structure",
+                path="discovery.qualification",
+            ),
+            receptor_site_diagnostic_budget=integer(
+                qualification,
+                "receptor_site_diagnostic_budget",
                 path="discovery.qualification",
             ),
             max_native_ligand_rmsd_A=number(
@@ -408,19 +435,14 @@ def parse_discovery(
                 "min_native_receptor_contact_fraction",
                 path="discovery.qualification",
             ),
-            min_native_sampling_seed_support=integer(
-                qualification,
-                "min_native_sampling_seed_support",
-                path="discovery.qualification",
-            ),
             min_native_site_seed_support=integer(
                 qualification,
                 "min_native_site_seed_support",
                 path="discovery.qualification",
             ),
-            min_selection_native_seed_recall_fraction=number(
+            min_native_receptor_support=integer(
                 qualification,
-                "min_selection_native_seed_recall_fraction",
+                "min_native_receptor_support",
                 path="discovery.qualification",
             ),
             topology_calibration_status=string(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,14 +17,21 @@ from vela.core.provenance import (
     vela_software_identity,
 )
 from vela.core.run_identity import validate_run_id
+from vela.core.typed_data import object_mapping
+from vela.discovery.analysis.clustering import candidate_analysis_contract
 from vela.discovery.models import DiscoveryError, DiscoveryTask
-from vela.discovery.readiness import assess_discovery_readiness
+from vela.discovery.readiness import (
+    DiscoveryReadiness,
+    assess_discovery_exploration_readiness,
+    assess_discovery_readiness,
+)
 from vela.discovery.sampling.cabsdock import cabsdock_source_records
 from vela.discovery.sampling.evidence import candidate_selection_contract
 from vela.discovery.sampling.materialization import materializer_record
 from vela.preparation.chemistry import chemistry_record_relative_path
 
 MAIN_DISCOVERY_EVIDENCE = "main_discovery"
+EXPLORATORY_DISCOVERY_EVIDENCE = "exploratory_discovery"
 
 
 def cabsdock_parameters(config: AppConfig) -> dict[str, JsonValue]:
@@ -89,17 +97,14 @@ def _required_text(value: str | None, *, name: str) -> str:
     return value
 
 
-def build_tasks(config: AppConfig, *, target_id: str) -> tuple[DiscoveryTask, ...]:
-    """为一个目标的受体构象展开独立 seed 任务。"""
-    readiness = assess_discovery_readiness(
-        target_id=target_id,
-        chemistry=config.chemistry,
-        settings=config.discovery,
-        receptors=config.receptors,
-        audit=config.audit,
-        preparation=config.preparation,
-        data_dir=config.paths.data_dir,
-    )
+def _build_tasks(
+    config: AppConfig,
+    *,
+    target_id: str,
+    evidence_category: str,
+    readiness: DiscoveryReadiness,
+) -> tuple[DiscoveryTask, ...]:
+    """按已核验的受体集合展开独立 seed 任务。"""
     if not readiness.ready:
         raise DiscoveryError(
             "discovery is not ready: "
@@ -133,10 +138,125 @@ def build_tasks(config: AppConfig, *, target_id: str) -> tuple[DiscoveryTask, ..
                     method_id=method_id,
                     adapter_id=adapter_id,
                     seed=seed,
-                    evidence_category=MAIN_DISCOVERY_EVIDENCE,
+                    evidence_category=evidence_category,
                 )
             )
     return tuple(tasks)
+
+
+def build_tasks(config: AppConfig, *, target_id: str) -> tuple[DiscoveryTask, ...]:
+    """为一个正式目标的受体构象展开独立 seed 任务。"""
+    readiness = assess_discovery_readiness(
+        target_id=target_id,
+        chemistry=config.chemistry,
+        settings=config.discovery,
+        receptors=config.receptors,
+        audit=config.audit,
+        preparation=config.preparation,
+        data_dir=config.paths.data_dir,
+    )
+    return _build_tasks(
+        config,
+        target_id=target_id,
+        evidence_category=MAIN_DISCOVERY_EVIDENCE,
+        readiness=readiness,
+    )
+
+
+def _production_authorization(
+    *, config: AppConfig, target_id: str
+) -> dict[str, JsonValue]:
+    """冻结正式任务实际依赖的资格报告。"""
+    target = config.discovery.target(target_id)
+    report = target.qualification_report
+    if report is None or not report.is_file():
+        raise DiscoveryError("qualification_report is unresolved or missing")
+    digest = sha256_file(report)
+    if digest != target.qualification_report_sha256:
+        raise DiscoveryError("qualification_report hash differs from the config")
+    return {
+        "scope": "production",
+        "production_qualified": True,
+        "qualification_report": {
+            "path": report.as_posix(),
+            "sha256": digest,
+        },
+    }
+
+
+def _exploration_authorization(
+    *, config: AppConfig, target_id: str, basis_run: Path
+) -> dict[str, JsonValue]:
+    """记录开发性运行的历史依据和不可用于正式结论的边界。"""
+    resolved = basis_run.expanduser().resolve()
+    root = (config.paths.outputs_dir / "discovery" / "qualifications").resolve()
+    if not resolved.is_relative_to(root):
+        raise DiscoveryError(
+            "exploration basis run is outside outputs/discovery/qualifications: "
+            f"{resolved}"
+        )
+    required_names = (
+        "qualification_plan.json",
+        "qualification_sampling.json",
+        "qualification_report.json",
+        "pose_evidence.tsv",
+    )
+    missing = tuple(name for name in required_names if not (resolved / name).is_file())
+    if missing:
+        raise DiscoveryError(
+            "exploration basis run is incomplete: " + ", ".join(missing)
+        )
+    try:
+        raw_plan: object = json.loads(
+            (resolved / "qualification_plan.json").read_text(encoding="utf-8")
+        )
+        raw_report: object = json.loads(
+            (resolved / "qualification_report.json").read_text(encoding="utf-8")
+        )
+        plan = object_mapping(raw_plan, name="exploration basis plan")
+        report = object_mapping(raw_report, name="exploration basis report")
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+        raise DiscoveryError("exploration basis records are invalid") from exc
+    if plan.get("target_id") != target_id or report.get("target_id") != target_id:
+        raise DiscoveryError(
+            "exploration basis target differs from the requested target"
+        )
+    recorded_status = report.get("status")
+    if not isinstance(recorded_status, str) or not recorded_status.strip():
+        raise DiscoveryError("exploration basis report status is invalid")
+    artifacts: dict[str, JsonValue] = {
+        name: {
+            "path": (resolved / name).as_posix(),
+            "sha256": sha256_file(resolved / name),
+        }
+        for name in required_names
+    }
+    basis_record: dict[str, JsonValue] = {
+        "path": resolved.as_posix(),
+        "recorded_status": recorded_status,
+        "artifacts": artifacts,
+    }
+    authorization: dict[str, JsonValue] = {
+        "scope": "development_only",
+        "production_qualified": False,
+        "independent_holdout_qualified": False,
+        "current_target_qualification_status": (
+            config.discovery.target(target_id).qualification_status
+        ),
+        "evidence_limit": (
+            "post_hoc_candidate_contract_not_independently_qualified; "
+            "results_must_not_be_reported_as_production_discovery"
+        ),
+        "basis_run": basis_record,
+    }
+    return authorization
+
+
+def production_authorization(
+    *, config: AppConfig, target_id: str
+) -> dict[str, JsonValue]:
+    """供其他正式全局采样入口复用同一资格事实。"""
+    return _production_authorization(config=config, target_id=target_id)
 
 
 def write_sampling_plan(
@@ -148,6 +268,7 @@ def write_sampling_plan(
     tasks: tuple[DiscoveryTask, ...],
     evidence_category: str,
     receptor_selection: dict[str, JsonValue],
+    method_authorization: dict[str, JsonValue],
     additional_inputs: dict[str, JsonValue] | None = None,
 ) -> DiscoveryPlan:
     """把任意已放行的全表面受体集合冻结为统一采样计划。"""
@@ -174,21 +295,28 @@ def write_sampling_plan(
         task.evidence_category != evidence_category for task in tasks
     ):
         raise DiscoveryError("sampling tasks must share the declared evidence category")
+    authorization_scope = method_authorization.get("scope")
+    expected_scope = (
+        "development_only"
+        if evidence_category == EXPLORATORY_DISCOVERY_EVIDENCE
+        else "production"
+    )
+    if authorization_scope != expected_scope:
+        raise DiscoveryError(
+            "sampling evidence category and method authorization scope disagree"
+        )
+    expected_qualified = expected_scope == "production"
+    if method_authorization.get("production_qualified") is not expected_qualified:
+        raise DiscoveryError("method authorization qualification flag is invalid")
     task_ids = tuple(task.task_id for task in tasks)
     if len(task_ids) != len(set(task_ids)):
         raise DiscoveryError("sampling task IDs must be unique")
     chemistry_path = config.paths.data_dir / chemistry_record_relative_path(
         config.chemistry
     )
-    target_settings = config.discovery.target(target_id)
-    report = target_settings.qualification_report
     if not chemistry_path.is_file():
         raise DiscoveryError(f"chemistry record does not exist: {chemistry_path}")
-    if report is None or not report.is_file():
-        raise DiscoveryError("qualification_report is unresolved or missing")
-    report_hash = sha256_file(report)
-    if report_hash != target_settings.qualification_report_sha256:
-        raise DiscoveryError("qualification_report hash differs from the config")
+    target_settings = config.discovery.target(target_id)
     analysis = target_settings.analysis
     manifest_tasks: list[dict[str, JsonValue]] = []
     for task in tasks:
@@ -239,10 +367,7 @@ def write_sampling_plan(
             "path": chemistry_path.relative_to(config.paths.data_dir).as_posix(),
             "sha256": sha256_file(chemistry_path),
         },
-        "qualification_report": {
-            "path": report.as_posix(),
-            "sha256": report_hash,
-        },
+        "method_authorization": method_authorization,
     }
     if additional_inputs is not None:
         overlap = set(input_records) & set(additional_inputs)
@@ -255,7 +380,7 @@ def write_sampling_plan(
     atomic_write_json(
         run_dir / "run_manifest.json",
         {
-            "schema": "vela.discovery-run-manifest/5",
+            "schema": "vela.discovery-run-manifest/8",
             "run_id": run_id,
             "target_id": target_id,
             "stage": "discovery",
@@ -266,12 +391,7 @@ def write_sampling_plan(
             "known_site_information_used": False,
             "site_definition_frozen": True,
             "inputs": input_records,
-            "analysis_rules": {
-                "contact_jaccard_distance": analysis.contact_jaccard_distance,
-                "position_distance_A": analysis.position_distance_A,
-                "min_seed_support": analysis.min_seed_support,
-                "min_receptor_support": analysis.min_receptor_support,
-            },
+            "analysis_contract": candidate_analysis_contract(analysis),
             "method_parameters": {
                 "cabsdock": cabsdock_parameters(config),
                 "chemical_fidelity": (
@@ -312,4 +432,50 @@ def write_discovery_plan(
             "allowed_structure_states": list(ensemble.allowed_structure_states),
             "reference_receptor": config.discovery.target(target_id).reference_receptor,
         },
+        method_authorization=_production_authorization(
+            config=config, target_id=target_id
+        ),
+    )
+
+
+def write_exploration_plan(
+    *, config: AppConfig, run_id: str, target_id: str, basis_run: Path
+) -> DiscoveryPlan:
+    """冻结一个不会被误认为正式证据的双受体开发性发现任务。"""
+    readiness = assess_discovery_exploration_readiness(
+        target_id=target_id,
+        chemistry=config.chemistry,
+        settings=config.discovery,
+        receptors=config.receptors,
+        audit=config.audit,
+        preparation=config.preparation,
+        data_dir=config.paths.data_dir,
+    )
+    tasks = _build_tasks(
+        config,
+        target_id=target_id,
+        evidence_category=EXPLORATORY_DISCOVERY_EVIDENCE,
+        readiness=readiness,
+    )
+    ensemble = config.discovery.ensemble
+    return write_sampling_plan(
+        config=config,
+        run_id=run_id,
+        target_id=target_id,
+        run_dir=config.paths.outputs_dir / "runs" / run_id,
+        tasks=tasks,
+        evidence_category=EXPLORATORY_DISCOVERY_EVIDENCE,
+        receptor_selection={
+            "mode": "configured_receptor_role",
+            "role": "blind_discovery",
+            "target_id": target_id,
+            "min_receptors_per_target": ensemble.min_receptors_per_target,
+            "allowed_structure_states": list(ensemble.allowed_structure_states),
+            "reference_receptor": config.discovery.target(target_id).reference_receptor,
+        },
+        method_authorization=_exploration_authorization(
+            config=config,
+            target_id=target_id,
+            basis_run=basis_run,
+        ),
     )

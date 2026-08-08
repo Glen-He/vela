@@ -72,10 +72,10 @@ from vela.validation.rosetta import (
 PLAN_NAME = "topology_calibration_plan.json"
 MANIFEST_NAME = "topology_calibration_manifest.json"
 REPORT_NAME = "topology_calibration_report.json"
-PLAN_SCHEMA = "vela.disulfide-topology-calibration-plan/6"
-TASK_SCHEMA = "vela.disulfide-topology-calibration-task-result/6"
-MANIFEST_SCHEMA = "vela.disulfide-topology-calibration-manifest/6"
-REPORT_SCHEMA = "vela.disulfide-topology-calibration-report/6"
+PLAN_SCHEMA = "vela.disulfide-topology-calibration-plan/5"
+TASK_SCHEMA = "vela.disulfide-topology-calibration-task-result/5"
+MANIFEST_SCHEMA = "vela.disulfide-topology-calibration-manifest/5"
+REPORT_SCHEMA = "vela.disulfide-topology-calibration-report/5"
 
 
 @dataclass(frozen=True, slots=True)
@@ -633,13 +633,13 @@ def write_topology_calibration_plan(
         raise DiscoveryError("source qualification control scope is invalid") from exc
     if (
         control_scope.get("native_bound_state_id") != state.state_id
-        or control_scope.get("control_receptor_id")
-        != config.discovery.qualification.control_receptor_id
+        or control_scope.get("benchmark_receptor_id")
+        != config.discovery.qualification.benchmark_receptor_id
     ):
         raise DiscoveryError("source qualification uses a different control system")
     controls = _control_rows(
         source_plan=source_plan,
-        receptor_id=config.discovery.qualification.control_receptor_id,
+        receptor_id=config.discovery.qualification.benchmark_receptor_id,
         data_dir=config.paths.data_dir,
     )
     calibration = config.discovery.qualification.topology_calibration

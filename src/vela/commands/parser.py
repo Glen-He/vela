@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     discovery_commands = discovery_group.add_subparsers(dest="command", required=True)
     qualification_plan = discovery_commands.add_parser(
         "qualification-plan",
-        help="Freeze one target's positive control and apo pilot.",
+        help="Freeze a target-matched multi-receptor site-discovery control.",
     )
     _add_config_argument(qualification_plan)
     qualification_plan.add_argument(
@@ -81,11 +81,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     qualification_plan.add_argument(
         "--target", required=True, help="One configured receptor target to qualify."
-    )
-    qualification_plan.add_argument(
-        "--control-run",
-        type=Path,
-        help="Completed qualification run whose verified positive control is reused.",
     )
     qualification_run = discovery_commands.add_parser(
         "qualification-run", help="Execute or resume frozen qualification sampling."
@@ -165,6 +160,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--target",
         required=True,
         help="One configured receptor target for this complete discovery run.",
+    )
+    exploration_plan = discovery_commands.add_parser(
+        "exploration-plan",
+        help="Freeze one development-only discovery run without production claims.",
+    )
+    _add_config_argument(exploration_plan)
+    exploration_plan.add_argument(
+        "--run-id", required=True, help="Unique identifier for the exploration run."
+    )
+    exploration_plan.add_argument(
+        "--target", required=True, help="One configured receptor target to explore."
+    )
+    exploration_plan.add_argument(
+        "--basis-run",
+        dest="exploration_basis_run",
+        type=Path,
+        required=True,
+        help="Completed development qualification run documenting the evidence limit.",
     )
     discovery_run = discovery_commands.add_parser(
         "run", help="Execute or resume the frozen CABS-dock sampling tasks."
@@ -302,6 +315,73 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Supported candidate ID to include; repeat for an explicit reviewed set.",
     )
+    exploration_handoff_plan = validation_commands.add_parser(
+        "exploration-handoff-plan",
+        help="Freeze separated blind and functional arms for development-only handoff.",
+    )
+    _add_config_argument(exploration_handoff_plan)
+    exploration_handoff_plan.add_argument(
+        "--discovery-run",
+        type=Path,
+        required=True,
+        help="Analyzed exploratory discovery directory below outputs/runs.",
+    )
+    exploration_handoff_plan.add_argument(
+        "--run-id", required=True, help="Unique identifier for the handoff run."
+    )
+    exploration_handoff_plan.add_argument(
+        "--blind-candidate-id",
+        action="append",
+        required=True,
+        help="Native-free blind-arm candidate in frozen rank order; repeat as needed.",
+    )
+    exploration_handoff_plan.add_argument(
+        "--functional-candidate-id",
+        action="append",
+        required=True,
+        help="Post-hoc functional-arm candidate in frozen blind-rank order.",
+    )
+    confirmation_handoff_plan = validation_commands.add_parser(
+        "confirmation-handoff-plan",
+        help="Freeze distinct CABS source-seed starts for one exploratory candidate.",
+    )
+    _add_config_argument(confirmation_handoff_plan)
+    confirmation_handoff_plan.add_argument(
+        "--discovery-run",
+        type=Path,
+        required=True,
+        help="Analyzed exploratory discovery directory below outputs/runs.",
+    )
+    confirmation_handoff_plan.add_argument(
+        "--run-id", required=True, help="Unique identifier for the confirmation run."
+    )
+    confirmation_handoff_plan.add_argument(
+        "--candidate-id",
+        action="append",
+        required=True,
+        help="Exactly one prespecified exploratory candidate to confirm.",
+    )
+    funnel_handoff_plan = validation_commands.add_parser(
+        "funnel-handoff-plan",
+        help="Run the zero-Rosetta Stage 3A-0 audit and freeze screening handoff.",
+    )
+    _add_config_argument(funnel_handoff_plan)
+    funnel_handoff_plan.add_argument(
+        "--discovery-run",
+        type=Path,
+        required=True,
+        help="Analyzed exploratory discovery directory below outputs/runs.",
+    )
+    funnel_handoff_plan.add_argument(
+        "--negative-refinement-run",
+        type=Path,
+        action="append",
+        required=True,
+        help="Analyzed prior negative refinement run; repeat for the evidence ledger.",
+    )
+    funnel_handoff_plan.add_argument(
+        "--run-id", required=True, help="Unique identifier for the screening handoff."
+    )
     validation_handoff_run = validation_commands.add_parser(
         "handoff-run", help="Execute or resume a frozen all-atom handoff."
     )
@@ -363,6 +443,24 @@ def build_parser() -> argparse.ArgumentParser:
     qualification_refinement_plan.add_argument(
         "--run-id", required=True, help="Unique identifier for the diagnostic run."
     )
+    qualification_refinement_plan.add_argument(
+        "--start-id",
+        action="append",
+        required=True,
+        help=(
+            "Passed handoff task ID to diagnose; repeat for an explicit "
+            "native-aware development subset."
+        ),
+    )
+    qualification_refinement_plan.add_argument(
+        "--receptor-backbone-mode",
+        choices=("fixed", "local_constrained"),
+        required=True,
+        help=(
+            "Receptor backbone protocol: fixed baseline or native-free local "
+            "constrained flexibility."
+        ),
+    )
     qualification_refinement_run = validation_commands.add_parser(
         "qualification-refinement-run",
         help="Execute or resume the frozen native-aware recovery diagnostic.",
@@ -403,8 +501,59 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Planned run directory below outputs/validation/guided.",
     )
+    funnel_confirmation_plan = validation_commands.add_parser(
+        "funnel-confirmation-plan",
+        help="Freeze the second-seed Stage 3B tasks from completed Stage 3A hits.",
+    )
+    _add_config_argument(funnel_confirmation_plan)
+    funnel_confirmation_plan.add_argument(
+        "--source-run",
+        type=Path,
+        required=True,
+        help="Completed and analyzed Stage 3A refinement directory.",
+    )
+    funnel_confirmation_plan.add_argument(
+        "--run-id", required=True, help="Unique identifier for the Stage 3B run."
+    )
+    funnel_confirmation_analyze = validation_commands.add_parser(
+        "funnel-confirmation-analyze",
+        help="Merge Stage 3A and Stage 3B decoys and apply the frozen 3/4-cell gate.",
+    )
+    _add_config_argument(funnel_confirmation_analyze)
+    funnel_confirmation_analyze.add_argument(
+        "--run-dir",
+        type=Path,
+        required=True,
+        help="Completed Stage 3B directory below outputs/validation/refinements.",
+    )
+    funnel_deep_plan = validation_commands.add_parser(
+        "funnel-deep-plan",
+        help="Freeze the third- and fourth-seed Stage 3C tasks from Stage 3B hits.",
+    )
+    _add_config_argument(funnel_deep_plan)
+    funnel_deep_plan.add_argument(
+        "--source-run",
+        type=Path,
+        required=True,
+        help="Completed and analyzed Stage 3B refinement directory.",
+    )
+    funnel_deep_plan.add_argument(
+        "--run-id", required=True, help="Unique identifier for the Stage 3C run."
+    )
+    funnel_deep_analyze = validation_commands.add_parser(
+        "funnel-deep-analyze",
+        help="Merge Stage 3A through 3C and apply the frozen per-source seed gate.",
+    )
+    _add_config_argument(funnel_deep_analyze)
+    funnel_deep_analyze.add_argument(
+        "--run-dir",
+        type=Path,
+        required=True,
+        help="Completed Stage 3C directory below outputs/validation/refinements.",
+    )
     validation_refinement_plan = validation_commands.add_parser(
-        "refinement-plan", help="Freeze qualified blind or guided refinement tasks."
+        "refinement-plan",
+        help="Freeze source-authorized blind, exploratory, or guided refinement tasks.",
     )
     _add_config_argument(validation_refinement_plan)
     validation_refinement_plan.add_argument(

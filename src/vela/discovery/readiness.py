@@ -42,21 +42,13 @@ class DiscoveryReadiness:
         return not self.issues
 
 
-def _method_issues(
+def _operational_method_issues(
     *,
     chemistry: ChemistryDefinition,
     settings: DiscoverySettings,
     target: DiscoveryTargetSettings,
 ) -> list[ReadinessIssue]:
     issues: list[ReadinessIssue] = []
-    if target.qualification_status != "qualified":
-        issues.append(
-            ReadinessIssue(
-                "method_not_qualified",
-                f"{target.target_id} qualification status: "
-                f"{target.qualification_status}",
-            )
-        )
     if settings.method_id is None:
         issues.append(
             ReadinessIssue("method_unresolved", "global method_id is unresolved")
@@ -95,6 +87,20 @@ def _method_issues(
             ReadinessIssue(
                 "cabsdock_secondary_structure_mismatch",
                 "CABS-dock peptide secondary structure length does not match the ligand",
+            )
+        )
+    return issues
+
+
+def _qualification_issues(*, target: DiscoveryTargetSettings) -> list[ReadinessIssue]:
+    """验证正式生产所依赖的方法资格记录。"""
+    issues: list[ReadinessIssue] = []
+    if target.qualification_status != "qualified":
+        issues.append(
+            ReadinessIssue(
+                "method_not_qualified",
+                f"{target.target_id} qualification status: "
+                f"{target.qualification_status}",
             )
         )
     report = target.qualification_report
@@ -159,6 +165,15 @@ def _method_issues(
                         "position_distance_A": target.analysis.position_distance_A,
                         "min_seed_support": target.analysis.min_seed_support,
                         "min_receptor_support": target.analysis.min_receptor_support,
+                        "min_conformation_specific_seed_support": (
+                            target.analysis.min_conformation_specific_seed_support
+                        ),
+                        "ensemble_candidate_budget": (
+                            target.analysis.ensemble_candidate_budget
+                        ),
+                        "conformation_specific_candidate_budget": (
+                            target.analysis.conformation_specific_candidate_budget
+                        ),
                     }
                     recommendation_mismatch = any(
                         recommended.get(key) != value for key, value in expected.items()
@@ -258,6 +273,17 @@ def _analysis_issues(
                 "min_seed_support exceeds the number of frozen independent seeds",
             )
         )
+    specific_seed_support = target.analysis.min_conformation_specific_seed_support
+    if specific_seed_support is not None and specific_seed_support > len(
+        settings.seeds
+    ):
+        issues.append(
+            ReadinessIssue(
+                "conformation_specific_seed_support_impossible",
+                "min_conformation_specific_seed_support exceeds the number of "
+                "frozen independent seeds",
+            )
+        )
     receptor_support = target.analysis.min_receptor_support
     receptor_count = sum(
         "blind_discovery" in item.roles and item.target == target_id
@@ -274,7 +300,7 @@ def _analysis_issues(
     return issues
 
 
-def assess_discovery_readiness(
+def _assess_discovery_readiness(
     *,
     target_id: str,
     chemistry: ChemistryDefinition,
@@ -283,8 +309,9 @@ def assess_discovery_readiness(
     audit: ReceptorAuditConfig,
     preparation: ReceptorPreparationConfig,
     data_dir: Path,
+    require_qualification: bool,
 ) -> DiscoveryReadiness:
-    """汇总化学、阶段一产物、方法、分析规则和主受体门槛。"""
+    """汇总共享运行条件, 并按用途决定是否要求正式资格。"""
     target_settings = next(
         (target for target in settings.targets if target.target_id == target_id), None
     )
@@ -308,12 +335,17 @@ def assess_discovery_readiness(
             for issue in preparation_readiness.issues
         ]
         + (
-            _method_issues(
+            _operational_method_issues(
                 chemistry=chemistry,
                 settings=settings,
                 target=target_settings,
             )
             if target_settings is not None
+            else []
+        )
+        + (
+            _qualification_issues(target=target_settings)
+            if target_settings is not None and require_qualification
             else []
         )
         + receptor_problems
@@ -332,4 +364,55 @@ def assess_discovery_readiness(
     return DiscoveryReadiness(target_id, tuple(unique.values()), receptor_ids)
 
 
-__all__ = ["DiscoveryReadiness", "ReadinessIssue", "assess_discovery_readiness"]
+def assess_discovery_readiness(
+    *,
+    target_id: str,
+    chemistry: ChemistryDefinition,
+    settings: DiscoverySettings,
+    receptors: tuple[ReceptorDefinition, ...],
+    audit: ReceptorAuditConfig,
+    preparation: ReceptorPreparationConfig,
+    data_dir: Path,
+) -> DiscoveryReadiness:
+    """检查正式发现任务的完整运行条件和资格记录。"""
+    return _assess_discovery_readiness(
+        target_id=target_id,
+        chemistry=chemistry,
+        settings=settings,
+        receptors=receptors,
+        audit=audit,
+        preparation=preparation,
+        data_dir=data_dir,
+        require_qualification=True,
+    )
+
+
+def assess_discovery_exploration_readiness(
+    *,
+    target_id: str,
+    chemistry: ChemistryDefinition,
+    settings: DiscoverySettings,
+    receptors: tuple[ReceptorDefinition, ...],
+    audit: ReceptorAuditConfig,
+    preparation: ReceptorPreparationConfig,
+    data_dir: Path,
+) -> DiscoveryReadiness:
+    """检查开发性发现任务的运行条件, 但不把它伪装成正式资格。"""
+    return _assess_discovery_readiness(
+        target_id=target_id,
+        chemistry=chemistry,
+        settings=settings,
+        receptors=receptors,
+        audit=audit,
+        preparation=preparation,
+        data_dir=data_dir,
+        require_qualification=False,
+    )
+
+
+__all__ = [
+    "DiscoveryReadiness",
+    "ReadinessIssue",
+    "assess_discovery_exploration_readiness",
+    "assess_discovery_readiness",
+]

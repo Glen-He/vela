@@ -1,3 +1,4 @@
+import json
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -7,6 +8,8 @@ import pytest
 
 from vela.config import load_config
 from vela.core.provenance import atomic_write_json, sha256_file
+from vela.core.typed_data import object_mapping
+from vela.discovery.analysis.evidence import PoseEvidence
 from vela.discovery.analysis.reports import (
     ReportedCandidateSite,
     ReportedReceptorSite,
@@ -22,18 +25,42 @@ from vela.validation.models import (
     RosettaSettings,
     ValidationError,
 )
+from vela.validation.readiness import assess_validation_readiness
+from vela.validation.refinement.analysis import (
+    is_funnel_confirmation_hit,
+    is_funnel_deep_hit,
+)
 from vela.validation.refinement.geometry import (
+    RefinedCluster,
     RefinedDecoy,
     ResolvedAnalysisSettings,
+    assess_complex_geometry,
     cluster_refined_decoys,
+    read_complex_geometry,
 )
-from vela.validation.refinement.planning import build_refinement_tasks
+from vela.validation.refinement.handoff_plan import (
+    exploration_promotion_contract,
+    funnel_screening_contract,
+    select_ranked_pose_cluster_representatives,
+    select_source_seed_representatives,
+)
+from vela.validation.refinement.planning import (
+    build_refinement_tasks,
+    select_exploration_candidates,
+    select_funnel_screening_candidates,
+)
 from vela.validation.refinement.qualification_analysis import (
     DiagnosticDecoy,
     cluster_diagnostic_decoys,
 )
 from vela.validation.refinement.qualification_diagnostic import (
+    DiagnosticStart,
+    build_diagnostic_tasks,
     validated_handoff_task_counts,
+)
+from vela.validation.refinement.receptor_flexibility import (
+    select_local_receptor_backbone,
+    write_local_receptor_movemap,
 )
 from vela.validation.refinement.reconstruction import (
     assess_topology_reconstruction,
@@ -55,6 +82,173 @@ from vela.validation.scores import read_rosetta_scorefile
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PROJECT_CONFIG = PROJECT_ROOT / "configs"
+
+
+def _handoff_pose(*, pose_id: str, x: float, seed: int = 101) -> PoseEvidence:
+    """构造只用于姿态代表选择测试的最小有效证据。"""
+    return PoseEvidence(
+        task_id="task",
+        pose_id=pose_id,
+        receptor_id="receptor",
+        target="target",
+        seed=seed,
+        model_path=Path("models.pdb"),
+        model_sha256="0" * 64,
+        model_index=1,
+        contact_residues=frozenset({"A:1"}),
+        local_position=(x, 0.0, 0.0),
+        coordinate_frame_id="frame",
+        ranking_score=x,
+        score_name="score",
+        qc_status="passed",
+    )
+
+
+def _handoff_pose_distance(first: PoseEvidence, second: PoseEvidence) -> float:
+    return abs(first.local_position[0] - second.local_position[0])
+
+
+def test_qualification_diagnostic_accepts_an_explicit_single_start() -> None:
+    start = DiagnosticStart(
+        start_id="selected_start",
+        receptor_site_id="site",
+        receptor_id="receptor",
+        target="target",
+        source_seed=101,
+        input_path=Path("input.pdb"),
+        input_sha256="0" * 64,
+        receptor_residue_count=10,
+        fixed_histidine_pose_indices=(),
+        direct_contact_receptor_pose_indices=(),
+        flexible_receptor_pose_indices=(),
+    )
+
+    tasks = build_diagnostic_tasks((start,), (201, 203, 205, 207))
+
+    assert len(tasks) == 4
+    assert {task.start.start_id for task in tasks} == {"selected_start"}
+    assert {task.refinement_seed for task in tasks} == {201, 203, 205, 207}
+
+
+def test_qualification_diagnostic_requires_starts_and_seeds() -> None:
+    with pytest.raises(ValidationError, match="requires starts and seeds"):
+        build_diagnostic_tasks((), (201,))
+
+
+def _write_local_receptor_selection_structure(path: Path) -> None:
+    structure = gemmi.Structure()
+    model = gemmi.Model(1)
+    receptor = gemmi.Chain("A")
+    for index, x in enumerate((0.0, 4.0, 8.0, 12.0, 16.0), 1):
+        residue = gemmi.Residue()
+        residue.name = "ALA"
+        residue.seqid = gemmi.SeqId(index, " ")
+        atom = gemmi.Atom()
+        atom.name = "CA"
+        atom.element = gemmi.Element("C")
+        atom.pos = gemmi.Position(x, 0.0, 0.0)
+        residue.add_atom(atom)
+        receptor.add_residue(residue)
+    peptide = gemmi.Chain("P")
+    residue = gemmi.Residue()
+    residue.name = "GLY"
+    residue.seqid = gemmi.SeqId(1, " ")
+    atom = gemmi.Atom()
+    atom.name = "CA"
+    atom.element = gemmi.Element("C")
+    atom.pos = gemmi.Position(8.5, 0.0, 0.0)
+    residue.add_atom(atom)
+    peptide.add_residue(residue)
+    model.add_chain(receptor)
+    model.add_chain(peptide)
+    structure.add_model(model)
+    path.write_text(structure.make_minimal_pdb(), encoding="utf-8")
+
+
+def test_local_receptor_backbone_selection_and_movemap_are_native_free(
+    tmp_path: Path,
+) -> None:
+    complex_path = tmp_path / "start.pdb"
+    _write_local_receptor_selection_structure(complex_path)
+
+    selection = select_local_receptor_backbone(
+        path=complex_path, contact_A=2.0, sequence_padding=1
+    )
+    movemap = tmp_path / "local.movemap"
+    write_local_receptor_movemap(
+        destination=movemap,
+        receptor_residue_count=5,
+        peptide_residue_count=1,
+        flexible_receptor_pose_indices=selection.flexible_pose_indices,
+    )
+
+    assert selection.direct_contact_pose_indices == (3,)
+    assert selection.flexible_pose_indices == (2, 3, 4)
+    assert movemap.read_text(encoding="utf-8") == (
+        "RESIDUE 1 5 CHI\nRESIDUE 2 4 BBCHI\nRESIDUE 6 6 BBCHI\nJUMP * NO\nJUMP 1 YES\n"
+    )
+
+
+def test_handoff_pose_selection_balances_cluster_centers_and_edges() -> None:
+    first_cluster = tuple(
+        _handoff_pose(pose_id=f"first_{x}", x=x) for x in (0.0, 1.0, 3.0)
+    )
+    second_cluster = tuple(
+        _handoff_pose(pose_id=f"second_{x}", x=x) for x in (10.0, 11.0, 13.0)
+    )
+
+    selected = select_ranked_pose_cluster_representatives(
+        ranked_clusters=(first_cluster, second_cluster),
+        count=4,
+        distance=_handoff_pose_distance,
+    )
+
+    assert [pose.pose_id for pose in selected] == [
+        "first_1.0",
+        "second_11.0",
+        "first_3.0",
+        "second_13.0",
+    ]
+    assert {pose.seed for pose in selected} == {101}
+
+
+def test_handoff_pose_selection_rejects_insufficient_passed_poses() -> None:
+    with pytest.raises(ValidationError, match="only 1 passed poses"):
+        select_ranked_pose_cluster_representatives(
+            ranked_clusters=((_handoff_pose(pose_id="only", x=0.0),),),
+            count=2,
+            distance=_handoff_pose_distance,
+        )
+
+
+def test_confirmation_pose_selection_requires_distinct_source_seeds() -> None:
+    cluster = tuple(
+        _handoff_pose(pose_id=f"seed_{seed}", x=float(index), seed=seed)
+        for index, seed in enumerate((101, 102, 103, 104, 105))
+    )
+
+    selected = select_source_seed_representatives(
+        ranked_clusters=(cluster,),
+        count=4,
+        distance=_handoff_pose_distance,
+    )
+
+    assert len({pose.seed for pose in selected}) == 4
+    assert [pose.seed for pose in selected] == [103, 102, 104, 101]
+
+
+def test_confirmation_pose_selection_rejects_insufficient_source_seeds() -> None:
+    cluster = tuple(
+        _handoff_pose(pose_id=f"pose_{index}", x=float(index), seed=101)
+        for index in range(4)
+    )
+
+    with pytest.raises(ValidationError, match="only 1 distinct source seeds"):
+        select_source_seed_representatives(
+            ranked_clusters=(cluster,),
+            count=4,
+            distance=_handoff_pose_distance,
+        )
 
 
 def _rosetta_settings(*, lowres_preoptimize: bool = False) -> RosettaSettings:
@@ -136,7 +330,9 @@ def test_project_config_registers_distinct_bound_state_evidence() -> None:
         "4MD7_assembly_1",
         "1JWH_assembly_1",
     ]
-    assert not settings.config_complete
+    assert settings.config_complete
+    assert settings.qualification_status == "qualified"
+    assert settings.analysis.complete
 
 
 @pytest.mark.parametrize(
@@ -715,6 +911,95 @@ def _flexpepdock_input(path: Path, *, peptide_y: float = 4.0) -> None:
     path.write_text(structure.make_pdb_string(), encoding="utf-8")
 
 
+def test_refinement_geometry_records_invalid_disulfide_as_decoy_qc(
+    tmp_path: Path,
+) -> None:
+    config = load_config(PROJECT_CONFIG)
+    start_path = tmp_path / "start.pdb"
+    invalid_path = tmp_path / "invalid_disulfide.pdb"
+    _flexpepdock_input(start_path)
+    structure = gemmi.read_structure(str(start_path))
+    peptide = structure[0][1]
+    first_sg = next(atom for atom in peptide[0] if atom.name == "SG")
+    second_sg = next(atom for atom in peptide[-1] if atom.name == "SG")
+    second_sg.pos = gemmi.Position(
+        first_sg.pos.x + 2.667, first_sg.pos.y, first_sg.pos.z
+    )
+    invalid_path.write_text(structure.make_pdb_string(), encoding="utf-8")
+    start = read_complex_geometry(
+        path=start_path,
+        interface_contact_A=config.validation.interface_contact_A,
+    )
+    settings = ResolvedAnalysisSettings(
+        min_interface_contact_pairs=1,
+        min_interface_receptor_residues=1,
+        max_receptor_ca_rmsd_A=1.0,
+        min_start_contact_overlap=0.0,
+        max_start_site_displacement_A=10.0,
+        max_cluster_backbone_rmsd_A=2.0,
+        min_heavy_atom_distance_A=0.0,
+        min_refinement_seed_support=2,
+        min_refinement_start_support=2,
+        min_refinement_source_seed_support=2,
+    )
+
+    assessment = assess_complex_geometry(
+        path=invalid_path,
+        chemistry=config.chemistry,
+        start=start,
+        cluster_reference=start,
+        config=config,
+        settings=settings,
+    )
+
+    assert not assessment.passed
+    assert assessment.qc_failures == ("chemistry_invalid",)
+    assert assessment.chemistry_failure is not None
+    assert "disulfide SG distance is outside config" in assessment.chemistry_failure
+
+
+def test_refinement_neighbor_search_matches_exhaustive_interface_geometry(
+    tmp_path: Path,
+) -> None:
+    config = load_config(PROJECT_CONFIG)
+    path = tmp_path / "complex.pdb"
+    _flexpepdock_input(path)
+    structure = gemmi.read_structure(str(path))
+    receptor_atoms = tuple(
+        (residue, atom)
+        for residue in structure[0][0]
+        for atom in residue
+        if atom.element.name != "H"
+    )
+    peptide_atoms = tuple(
+        atom
+        for residue in structure[0][1]
+        for atom in residue
+        if atom.element.name != "H"
+    )
+    expected_pairs = 0
+    expected_contacts: set[str] = set()
+    expected_minimum = float("inf")
+    for residue, receptor_atom in receptor_atoms:
+        for peptide_atom in peptide_atoms:
+            distance = receptor_atom.pos.dist(peptide_atom.pos)
+            expected_minimum = min(expected_minimum, distance)
+            if distance <= config.validation.interface_contact_A:
+                expected_pairs += 1
+                expected_contacts.add(
+                    f"{residue.seqid.num}{residue.seqid.icode.strip()}"
+                )
+
+    geometry = read_complex_geometry(
+        path=path,
+        interface_contact_A=config.validation.interface_contact_A,
+    )
+
+    assert geometry.interface_contact_pairs == expected_pairs
+    assert geometry.receptor_contacts == expected_contacts
+    assert geometry.minimum_interface_distance_A == pytest.approx(expected_minimum)
+
+
 def test_control_recovery_pools_seed_batches_and_requires_repeatable_clusters(
     tmp_path: Path,
 ) -> None:
@@ -825,7 +1110,13 @@ def test_refinement_tasks_are_derived_from_handoff_and_configured_seeds(
     config = load_config(PROJECT_CONFIG)
     config = replace(
         config,
-        validation=replace(config.validation, seeds=(4101, 4103)),
+        validation=replace(
+            config.validation,
+            seeds=(4101, 4103, 4105),
+            refinement=replace(
+                config.validation.refinement, seed_batch_sizes=(1, 1, 1)
+            ),
+        ),
     )
     run_dir = tmp_path / "handoff"
     input_path = run_dir / "tasks" / "source_001" / "flexpepdock_input.pdb"
@@ -838,11 +1129,13 @@ def test_refinement_tasks_are_derived_from_handoff_and_configured_seeds(
     atomic_write_json(
         run_dir / "handoff_manifest.json",
         {
-            "schema": "vela.validation-handoff-manifest/7",
+            "schema": "vela.validation-handoff-manifest/8",
             "status": "completed",
             "chemistry_id": config.chemistry.chemistry_id,
             "evidence_category": "main_discovery_handoff",
+            "source_evidence_category": "main_discovery",
             "known_site_information_used": False,
+            "production_qualified": True,
             "handoff_plan": {
                 "path": plan_path.relative_to(run_dir).as_posix(),
                 "sha256": sha256_file(plan_path),
@@ -873,9 +1166,129 @@ def test_refinement_tasks_are_derived_from_handoff_and_configured_seeds(
 
     tasks = build_refinement_tasks(config=config, source_run_dir=run_dir)
 
-    assert [task.task_id for task in tasks] == ["refine_00001", "refine_00002"]
-    assert [task.seed for task in tasks] == [4101, 4103]
+    assert [task.task_id for task in tasks] == [
+        "refine_00001",
+        "refine_00002",
+        "refine_00003",
+    ]
+    assert [task.seed for task in tasks] == [4101, 4103, 4105]
     assert all(task.start.candidate_id == "CANDIDATE_001" for task in tasks)
+
+
+def test_exploration_refinement_uses_frozen_arm_order_and_same_arm_failover() -> None:
+    config = load_config(PROJECT_CONFIG)
+    contract = exploration_promotion_contract(config)
+    plan: dict[str, object] = {
+        "selection": {
+            "candidate_arms": {
+                "blind_discovery_arm": ["BLIND_A", "BLIND_B", "BLIND_C"],
+                "functional_annotation_arm": ["FUNCTIONAL_A", "FUNCTIONAL_B"],
+            },
+            "requested_candidate_ids": [
+                "BLIND_A",
+                "BLIND_B",
+                "BLIND_C",
+                "FUNCTIONAL_A",
+                "FUNCTIONAL_B",
+            ],
+            "promotion_contract": contract,
+        }
+    }
+    minimum = config.validation.analysis.min_refinement_start_support
+    assert minimum is not None
+    rows: list[dict[str, object]] = []
+    for candidate_id in (
+        "BLIND_A",
+        "BLIND_B",
+        "BLIND_C",
+        "FUNCTIONAL_A",
+        "FUNCTIONAL_B",
+    ):
+        for site_id in ("RECEPTOR_1", "RECEPTOR_2"):
+            passed_count = minimum
+            if candidate_id == "BLIND_A" and site_id == "RECEPTOR_2":
+                passed_count = minimum - 1
+            for _ in range(passed_count):
+                rows.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "receptor_site_id": site_id,
+                        "execution_status": "completed",
+                        "reconstruction_status": "passed",
+                    }
+                )
+
+    selected, record = select_exploration_candidates(
+        config=config,
+        handoff_plan=plan,
+        rows=tuple(rows),
+    )
+
+    assert selected == ("BLIND_B", "BLIND_C", "FUNCTIONAL_A")
+    assert record["selected_by_arm"] == {
+        "blind_discovery_arm": ["BLIND_B", "BLIND_C"],
+        "functional_annotation_arm": ["FUNCTIONAL_A"],
+    }
+
+
+def test_funnel_screening_excludes_candidates_with_incomplete_site_handoff() -> None:
+    config = load_config(PROJECT_CONFIG)
+    requested = ("COMPLETE", "INCOMPLETE")
+    rows: list[dict[str, object]] = []
+    for candidate_id in requested:
+        for site_id in ("RECEPTOR_1", "RECEPTOR_2"):
+            count = 2
+            if candidate_id == "INCOMPLETE" and site_id == "RECEPTOR_2":
+                count = 1
+            for _ in range(count):
+                rows.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "receptor_site_id": site_id,
+                        "execution_status": "completed",
+                        "reconstruction_status": "passed",
+                    }
+                )
+
+    selected, record = select_funnel_screening_candidates(
+        config=config,
+        requested=requested,
+        rows=tuple(rows),
+        promotion_contract={"contract": "frozen"},
+        funnel_audit={"audit": "frozen"},
+    )
+
+    assert selected == ("COMPLETE",)
+    assert record["excluded_candidate_ids"] == ["INCOMPLETE"]
+    support = object_mapping(record["candidate_support"], name="candidate support")
+    incomplete = object_mapping(support["INCOMPLETE"], name="incomplete support")
+    assert incomplete["eligible"] is False
+
+
+def test_historical_local_qualification_remains_valid_after_source_changes(
+    tmp_path: Path,
+) -> None:
+    config = load_config(PROJECT_CONFIG)
+    report = config.validation.qualification_report
+    assert report is not None
+    document = json.loads(report.read_text(encoding="utf-8"))
+    document["analysis_software"]["vela_source_sha256"] = "0" * 64
+    historical_report = tmp_path / "qualification_report.json"
+    atomic_write_json(historical_report, document)
+    config = replace(
+        config,
+        validation=replace(
+            config.validation,
+            qualification_report=historical_report,
+            qualification_report_sha256=sha256_file(historical_report),
+        ),
+    )
+
+    readiness = assess_validation_readiness(config)
+
+    assert "qualification_report_mismatch" not in {
+        issue.code for issue in readiness.issues
+    }
 
 
 def test_refinement_rejects_technically_invalid_handoff(tmp_path: Path) -> None:
@@ -888,11 +1301,13 @@ def test_refinement_rejects_technically_invalid_handoff(tmp_path: Path) -> None:
     atomic_write_json(
         run_dir / "handoff_manifest.json",
         {
-            "schema": "vela.validation-handoff-manifest/7",
+            "schema": "vela.validation-handoff-manifest/8",
             "status": "completed",
             "chemistry_id": config.chemistry.chemistry_id,
             "evidence_category": "main_discovery_handoff",
+            "source_evidence_category": "main_discovery",
             "known_site_information_used": False,
+            "production_qualified": True,
             "handoff_plan": {
                 "path": plan_path.relative_to(run_dir).as_posix(),
                 "sha256": sha256_file(plan_path),
@@ -963,7 +1378,13 @@ def test_refinement_tasks_preserve_guided_source_identity(tmp_path: Path) -> Non
     config = load_config(PROJECT_CONFIG)
     config = replace(
         config,
-        validation=replace(config.validation, seeds=(4201,)),
+        validation=replace(
+            config.validation,
+            seeds=(4201, 4203, 4205),
+            refinement=replace(
+                config.validation.refinement, seed_batch_sizes=(1, 1, 1)
+            ),
+        ),
     )
     run_dir = tmp_path / "guided"
     input_path = run_dir / "tasks" / "guided_001" / "flexpepdock_input.pdb"
@@ -1009,13 +1430,20 @@ def test_refinement_tasks_preserve_guided_source_identity(tmp_path: Path) -> Non
 
     tasks = build_refinement_tasks(config=config, source_run_dir=run_dir)
 
-    assert len(tasks) == 1
-    assert tasks[0].start.source_seed is None
-    assert tasks[0].start.candidate_id == "guided__replaceable_template"
+    assert len(tasks) == 3
+    assert all(task.start.source_seed is None for task in tasks)
+    assert all(
+        task.start.candidate_id == "guided__replaceable_template" for task in tasks
+    )
 
 
 def _refined_decoy(
-    *, decoy_id: str, seed: int, start_id: str, x_offset: float
+    *,
+    decoy_id: str,
+    seed: int,
+    start_id: str,
+    x_offset: float,
+    source_seed: int = 1001,
 ) -> RefinedDecoy:
     backbone = tuple(gemmi.Position(index + x_offset, 0.0, 0.0) for index in range(6))
     return RefinedDecoy(
@@ -1024,7 +1452,7 @@ def _refined_decoy(
         start_id=start_id,
         candidate_id="replaceable_candidate",
         receptor_id="replaceable_receptor",
-        source_seed=1001,
+        source_seed=source_seed,
         refinement_seed=seed,
         path=Path(f"{decoy_id}.pdb"),
         sha256="0" * 64,
@@ -1036,11 +1464,151 @@ def _refined_decoy(
         start_contact_overlap=1.0,
         start_site_displacement_A=0.1,
         qc_status="passed",
+        qc_failures=(),
+        chemistry_failure=None,
         cluster_backbone=backbone,
     )
 
 
 def test_refinement_cluster_support_is_config_driven() -> None:
+    decoys = (
+        _refined_decoy(
+            decoy_id="decoy_a",
+            seed=5101,
+            start_id="start_a",
+            x_offset=0.0,
+            source_seed=1001,
+        ),
+        _refined_decoy(
+            decoy_id="decoy_b",
+            seed=5103,
+            start_id="start_b",
+            x_offset=0.1,
+            source_seed=1002,
+        ),
+    )
+    settings = ResolvedAnalysisSettings(
+        min_interface_contact_pairs=1,
+        min_interface_receptor_residues=1,
+        max_receptor_ca_rmsd_A=1.0,
+        min_start_contact_overlap=0.5,
+        max_start_site_displacement_A=1.0,
+        max_cluster_backbone_rmsd_A=0.5,
+        min_heavy_atom_distance_A=1.0,
+        min_refinement_seed_support=2,
+        min_refinement_start_support=2,
+        min_refinement_source_seed_support=2,
+    )
+
+    clusters = cluster_refined_decoys(
+        decoys=decoys, settings=settings, require_source_seed_support=True
+    )
+
+    assert len(clusters) == 1
+    assert clusters[0].supported
+    assert clusters[0].refinement_seeds == (5101, 5103)
+    assert clusters[0].start_ids == ("start_a", "start_b")
+    assert clusters[0].source_seeds == (1001, 1002)
+    assert clusters[0].task_cells == ("start_a:5101", "start_b:5103")
+
+
+def test_refinement_funnel_contract_freezes_incremental_budget() -> None:
+    config = load_config(PROJECT_CONFIG)
+
+    contract = funnel_screening_contract(config)
+
+    assert contract["stage3a_screening"] == {
+        "source_starts_per_receptor_site": 2,
+        "rosetta_seed_count": 1,
+        "promotion_status": "cross_source_screening_hit",
+        "promotion_budget": 6,
+    }
+    assert contract["stage3b_confirmation"] == {
+        "additional_rosetta_seed_count": 1,
+        "minimum_source_starts": 2,
+        "minimum_rosetta_seeds": 2,
+        "minimum_source_seed_task_cells": 3,
+        "promotion_budget": 3,
+    }
+    assert contract["stage3c_deep_confirmation"] == {
+        "additional_rosetta_seed_count": 2,
+        "minimum_source_starts": 2,
+        "minimum_rosetta_seeds_per_source": 2,
+        "source_pool_per_receptor_site": 4,
+        "final_hypothesis_budget": 2,
+    }
+
+
+def test_funnel_confirmation_requires_three_distinct_source_seed_cells() -> None:
+    settings = ResolvedAnalysisSettings(
+        min_interface_contact_pairs=1,
+        min_interface_receptor_residues=1,
+        max_receptor_ca_rmsd_A=1.0,
+        min_start_contact_overlap=0.2,
+        max_start_site_displacement_A=6.0,
+        max_cluster_backbone_rmsd_A=2.0,
+        min_heavy_atom_distance_A=1.2,
+        min_refinement_seed_support=2,
+        min_refinement_start_support=2,
+        min_refinement_source_seed_support=2,
+    )
+
+    def cluster(task_cells: tuple[str, ...]) -> RefinedCluster:
+        return RefinedCluster(
+            cluster_id="cluster",
+            candidate_id="candidate",
+            receptor_id="receptor",
+            decoy_ids=("decoy",),
+            refinement_seeds=(120623, 120624),
+            start_ids=("start_a", "start_b"),
+            source_seeds=(120628, 120629),
+            task_cells=task_cells,
+            representative_decoy_id="decoy",
+            supported=True,
+        )
+
+    assert is_funnel_confirmation_hit(
+        cluster=cluster(("a:1", "a:2", "b:1")),
+        settings=settings,
+        minimum_task_cells=3,
+    )
+    assert not is_funnel_confirmation_hit(
+        cluster=cluster(("a:1", "b:2")),
+        settings=settings,
+        minimum_task_cells=3,
+    )
+
+
+def test_funnel_deep_requires_two_seeds_for_each_of_two_sources() -> None:
+    def cluster(task_cells: tuple[str, ...]) -> RefinedCluster:
+        return RefinedCluster(
+            cluster_id="cluster",
+            candidate_id="candidate",
+            receptor_id="receptor",
+            decoy_ids=("decoy",),
+            refinement_seeds=(120623, 120624, 120625),
+            start_ids=("start_a", "start_b"),
+            source_seeds=(120628, 120629),
+            task_cells=task_cells,
+            representative_decoy_id="decoy",
+            supported=True,
+        )
+
+    assert is_funnel_deep_hit(
+        cluster=cluster(
+            ("start_a:120623", "start_a:120624", "start_b:120623", "start_b:120625")
+        ),
+        minimum_source_starts=2,
+        minimum_rosetta_seeds_per_source=2,
+    )
+    assert not is_funnel_deep_hit(
+        cluster=cluster(("start_a:120623", "start_a:120624", "start_b:120625")),
+        minimum_source_starts=2,
+        minimum_rosetta_seeds_per_source=2,
+    )
+
+
+def test_refinement_cluster_rejects_same_cabs_source_seed() -> None:
     decoys = (
         _refined_decoy(decoy_id="decoy_a", seed=5101, start_id="start_a", x_offset=0.0),
         _refined_decoy(decoy_id="decoy_b", seed=5103, start_id="start_b", x_offset=0.1),
@@ -1055,14 +1623,16 @@ def test_refinement_cluster_support_is_config_driven() -> None:
         min_heavy_atom_distance_A=1.0,
         min_refinement_seed_support=2,
         min_refinement_start_support=2,
+        min_refinement_source_seed_support=2,
     )
 
-    clusters = cluster_refined_decoys(decoys=decoys, settings=settings)
+    clusters = cluster_refined_decoys(
+        decoys=decoys, settings=settings, require_source_seed_support=True
+    )
 
     assert len(clusters) == 1
-    assert clusters[0].supported
-    assert clusters[0].refinement_seeds == (5101, 5103)
-    assert clusters[0].start_ids == ("start_a", "start_b")
+    assert not clusters[0].supported
+    assert clusters[0].source_seeds == (1001,)
 
 
 def _diagnostic_decoy(
@@ -1161,6 +1731,7 @@ def _reported_site(
         target="replaceable_target",
         receptor_id=receptor_id,
         coordinate_frame_id="replaceable_frame",
+        pose_count=1,
         pose_ids=(f"{site_id}_pose",),
         supporting_seeds=(11, 13),
         representative_pose_id=f"{site_id}_pose",
@@ -1193,9 +1764,19 @@ def test_cross_state_comparison_uses_frozen_site_distance() -> None:
                 receptor_site_ids=(main_site.site_id,),
                 representative_site_id=main_site.site_id,
                 receptor_support=1,
-                supported=True,
+                evidence_tier="conformation_specific",
+                rank_within_tier=1,
+                minimum_seed_support=2,
+                total_seed_support=2,
+                maximum_normalized_site_distance=0.0,
+                minimum_selected_pose_fraction=1.0,
+                total_selected_pose_fraction=1.0,
+                median_receptor_score_quantile=0.5,
+                handoff_eligible=True,
             )
         },
+        ensemble_candidate_budget=8,
+        conformation_specific_candidate_budget=2,
         manifest_path=Path("main_manifest.json"),
     )
     replication = SiteAnalysisReport(
@@ -1203,6 +1784,8 @@ def test_cross_state_comparison_uses_frozen_site_distance() -> None:
         pose_path=Path("replication_poses.tsv"),
         receptor_sites={matched.site_id: matched, state_only.site_id: state_only},
         candidate_sites={},
+        ensemble_candidate_budget=8,
+        conformation_specific_candidate_budget=2,
         manifest_path=Path("replication_manifest.json"),
     )
 
@@ -1251,3 +1834,25 @@ def test_rosetta_success_leaves_no_crash_log(tmp_path: Path) -> None:
     assert log_path.is_file()
     assert not (crash_dir / "ROSETTA_CRASH.log").exists()
     assert tuple(crash_dir.glob("*ROSETTA_CRASH.log")) == ()
+
+
+def test_exploration_promotion_contract_uses_frozen_support_thresholds() -> None:
+    config = load_config(PROJECT_CONFIG)
+
+    contract = exploration_promotion_contract(config)
+
+    eligibility = object_mapping(
+        contract["candidate_eligibility"], name="candidate eligibility"
+    )
+    selection = object_mapping(
+        contract["deep_refinement_selection"], name="deep refinement selection"
+    )
+    success = object_mapping(
+        contract["deep_refinement_success"], name="deep refinement success"
+    )
+    assert eligibility["minimum_passed_starts_per_receptor_site"] == 2
+    assert eligibility["qc_metrics_used_for_candidate_reranking"] is False
+    assert selection["blind_discovery_arm_budget"] == 2
+    assert selection["functional_annotation_arm_budget"] == 1
+    assert success["minimum_independent_cabs_starts"] == 2
+    assert success["minimum_independent_rosetta_seeds"] == 2

@@ -25,6 +25,7 @@ from vela.validation.models import (
     EnvironmentReference,
     GuidedTemplate,
     LocalRecoveryControl,
+    RefinementFunnelSettings,
     RosettaSettings,
     ValidationAnalysisSettings,
     ValidationSettings,
@@ -75,6 +76,13 @@ def _seed_batches(value: object, *, name: str) -> tuple[tuple[int, ...], ...]:
     return tuple(
         _integers(batch, name=f"{name}[{index}]") for index, batch in enumerate(batches)
     )
+
+
+def _three_integers(value: object, *, name: str) -> tuple[int, int, int]:
+    values = _integers(value, name=name)
+    if len(values) != 3:
+        raise ConfigError(f"{name} must contain exactly three integers")
+    return values[0], values[1], values[2]
 
 
 def _texts(value: object, *, name: str) -> tuple[str, ...]:
@@ -332,6 +340,7 @@ def parse_validation(
         "cg2all",
         "handoff",
         "refinement",
+        "funnel",
         "analysis",
         "bound_states",
         "local_controls",
@@ -392,12 +401,34 @@ def parse_validation(
         "random_translation_A",
         "random_rotation_degrees",
         "ranking_score",
+        "receptor_backbone_contact_A",
+        "receptor_backbone_sequence_padding",
+        "seed_batch_sizes",
     }
     assert_keys(
         refinement,
         allowed=refinement_keys,
         required=refinement_keys,
         path="validation.refinement",
+    )
+    funnel = document(section["funnel"], name="validation.funnel")
+    funnel_keys = {
+        "ensemble_screening_budget",
+        "conformation_specific_screening_budget",
+        "screening_promotion_budget",
+        "confirmation_promotion_budget",
+        "final_hypothesis_budget",
+        "screening_starts_per_receptor_site",
+        "source_pool_per_receptor_site",
+        "confirmation_min_task_cells",
+        "cross_receptor_max_backbone_rmsd_A",
+        "cross_receptor_min_contact_jaccard",
+    }
+    assert_keys(
+        funnel,
+        allowed=funnel_keys,
+        required=funnel_keys,
+        path="validation.funnel",
     )
     analysis = document(section["analysis"], name="validation.analysis")
     analysis_keys = {
@@ -410,6 +441,7 @@ def parse_validation(
         "min_heavy_atom_distance_A",
         "min_refinement_seed_support",
         "min_refinement_start_support",
+        "min_refinement_source_seed_support",
     }
     assert_keys(
         analysis,
@@ -516,6 +548,62 @@ def parse_validation(
             ranking_score=string(
                 refinement, "ranking_score", path="validation.refinement"
             ),
+            receptor_backbone_contact_A=number(
+                refinement,
+                "receptor_backbone_contact_A",
+                path="validation.refinement",
+            ),
+            receptor_backbone_sequence_padding=integer(
+                refinement,
+                "receptor_backbone_sequence_padding",
+                path="validation.refinement",
+            ),
+            seed_batch_sizes=_three_integers(
+                refinement["seed_batch_sizes"],
+                name="validation.refinement.seed_batch_sizes",
+            ),
+        ),
+        funnel=RefinementFunnelSettings(
+            ensemble_screening_budget=integer(
+                funnel, "ensemble_screening_budget", path="validation.funnel"
+            ),
+            conformation_specific_screening_budget=integer(
+                funnel,
+                "conformation_specific_screening_budget",
+                path="validation.funnel",
+            ),
+            screening_promotion_budget=integer(
+                funnel, "screening_promotion_budget", path="validation.funnel"
+            ),
+            confirmation_promotion_budget=integer(
+                funnel, "confirmation_promotion_budget", path="validation.funnel"
+            ),
+            final_hypothesis_budget=integer(
+                funnel, "final_hypothesis_budget", path="validation.funnel"
+            ),
+            screening_starts_per_receptor_site=integer(
+                funnel,
+                "screening_starts_per_receptor_site",
+                path="validation.funnel",
+            ),
+            source_pool_per_receptor_site=integer(
+                funnel,
+                "source_pool_per_receptor_site",
+                path="validation.funnel",
+            ),
+            confirmation_min_task_cells=integer(
+                funnel, "confirmation_min_task_cells", path="validation.funnel"
+            ),
+            cross_receptor_max_backbone_rmsd_A=number(
+                funnel,
+                "cross_receptor_max_backbone_rmsd_A",
+                path="validation.funnel",
+            ),
+            cross_receptor_min_contact_jaccard=number(
+                funnel,
+                "cross_receptor_min_contact_jaccard",
+                path="validation.funnel",
+            ),
         ),
         analysis=ValidationAnalysisSettings(
             min_interface_contact_pairs=_optional_integer(
@@ -555,6 +643,11 @@ def parse_validation(
             min_refinement_start_support=_optional_integer(
                 analysis,
                 "min_refinement_start_support",
+                path="validation.analysis",
+            ),
+            min_refinement_source_seed_support=_optional_integer(
+                analysis,
+                "min_refinement_source_seed_support",
                 path="validation.analysis",
             ),
         ),

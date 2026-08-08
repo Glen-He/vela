@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
 from vela.config import AppConfig
-from vela.core.provenance import sha256_file
+from vela.core.provenance import (
+    is_vela_software_identity,
+    sha256_file,
+)
+from vela.core.typed_data import object_mapping
 from vela.discovery.readiness import assess_discovery_readiness
+from vela.validation.bound_states.schemas import REPORT_SCHEMA
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +56,45 @@ def _asset_paths(config: AppConfig) -> tuple[Path, ...]:
         for reference in config.validation.environment_references
     )
     return tuple(paths)
+
+
+def _qualification_report_issue(config: AppConfig) -> ValidationIssue | None:
+    """校验 matched local-control 报告的身份、范围与不可变内容。"""
+    report = config.validation.qualification_report
+    digest = config.validation.qualification_report_sha256
+    if report is None or not report.is_file():
+        return ValidationIssue(
+            "qualification_report_missing",
+            "Qualified Stage 3 method requires an existing report",
+        )
+    if digest is None or sha256_file(report) != digest:
+        return ValidationIssue(
+            "qualification_report_mismatch",
+            "Stage 3 qualification report hash does not match config",
+        )
+    try:
+        raw: object = json.loads(report.read_text(encoding="utf-8"))
+        document = object_mapping(raw, name="validation qualification report")
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        return ValidationIssue(
+            "qualification_report_invalid",
+            "Stage 3 qualification report is invalid",
+        )
+    if (
+        document.get("schema") != REPORT_SCHEMA
+        or document.get("stage") != "validation_qualification"
+        or document.get("status") != "qualified"
+        or document.get("method_id") != config.validation.method_id
+        or document.get("evidence_category") != "method_positive_control"
+        or document.get("ligand_candidate_evidence") is not False
+        or not is_vela_software_identity(document.get("sampling_software"))
+        or not is_vela_software_identity(document.get("analysis_software"))
+    ):
+        return ValidationIssue(
+            "qualification_report_mismatch",
+            "Stage 3 qualification report does not match the local-control contract",
+        )
+    return None
 
 
 def assess_validation_readiness(config: AppConfig) -> ValidationReadiness:
@@ -155,23 +200,10 @@ def assess_validation_readiness(config: AppConfig) -> ValidationReadiness:
                 "Stage 3 QC and clustering thresholds are not calibrated",
             )
         )
-    report = config.validation.qualification_report
-    expected_hash = config.validation.qualification_report_sha256
     if config.validation.qualification_status == "qualified":
-        if report is None or not report.is_file():
-            method_issues.append(
-                ValidationIssue(
-                    "qualification_report_missing",
-                    "Qualified Stage 3 method requires an existing report",
-                )
-            )
-        elif expected_hash is None or sha256_file(report) != expected_hash:
-            method_issues.append(
-                ValidationIssue(
-                    "qualification_report_mismatch",
-                    "Stage 3 qualification report hash does not match config",
-                )
-            )
+        report_issue = _qualification_report_issue(config)
+        if report_issue is not None:
+            method_issues.append(report_issue)
     replication_issues = [
         ValidationIssue(f"global_{issue.code}", f"{target_id}: {issue.message}")
         for target_id in (target.target_id for target in config.discovery.targets)

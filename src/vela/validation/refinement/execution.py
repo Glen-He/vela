@@ -14,6 +14,7 @@ from vela.validation.refinement.planning import (
     REFINEMENT_PLAN_NAME,
     RefinementStart,
     RefinementTask,
+    refinement_authorization,
     refinement_identity,
     verify_refinement_plan,
 )
@@ -125,6 +126,7 @@ def _prepare_start(
         nstruct=1,
         scorefile_name="prepack.sc",
         native_path=None,
+        movemap_path=None,
     )
     log_path = start_dir / "prepack.log"
     run_rosetta_command(
@@ -191,6 +193,7 @@ def _run_task(
         random_translation_A=config.validation.refinement.random_translation_A,
         random_rotation_degrees=config.validation.refinement.random_rotation_degrees,
         lowres_preoptimize=config.validation.rosetta.lowres_preoptimize,
+        min_receptor_backbone=False,
     )
     command = build_chemistry_flexpepdock_command(
         settings=config.validation.rosetta,
@@ -203,6 +206,7 @@ def _run_task(
         fixed_histidine_pose_indices=task.start.fixed_histidine_pose_indices,
         nstruct=config.validation.rosetta.decoys_per_seed,
         scorefile_name="refine.sc",
+        movemap_path=None,
     )
     log_path = task_dir / "refine.log"
     started_at = utc_now()
@@ -259,6 +263,7 @@ def run_refinement(*, config: AppConfig, run_dir: Path) -> RefinementOutcome:
         raise ValidationError(f"refinement manifest already exists: {manifest_path}")
     plan, tasks = verify_refinement_plan(config=config, run_dir=run_dir)
     evidence_category, known_site_information_used = refinement_identity(plan)
+    source_evidence_category, production_qualified = refinement_authorization(plan)
     plan_path = run_dir / REFINEMENT_PLAN_NAME
     plan_hash = sha256_file(plan_path)
     starts = {task.start.start_id: task.start for task in tasks}
@@ -285,14 +290,16 @@ def run_refinement(*, config: AppConfig, run_dir: Path) -> RefinementOutcome:
     atomic_write_json(
         manifest_path,
         {
-            "schema": "vela.validation-refinement-manifest/2",
+            "schema": "vela.validation-refinement-manifest/3",
             "stage": "validation_local_refinement",
             "status": "completed",
             "completed_at": utc_now(),
             "method_id": config.validation.method_id,
             "chemistry_id": config.chemistry.chemistry_id,
+            "source_evidence_category": source_evidence_category,
             "evidence_category": evidence_category,
             "known_site_information_used": known_site_information_used,
+            "production_qualified": production_qualified,
             "refinement_plan": file_record(plan_path, root=run_dir),
             "tasks": [
                 {

@@ -33,7 +33,10 @@ from vela.discovery.qualification.topology import (
 )
 from vela.discovery.readiness import DiscoveryReadiness, assess_discovery_readiness
 from vela.discovery.sampling.execution import run_cabsdock_sampling
-from vela.discovery.sampling.planning import write_discovery_plan
+from vela.discovery.sampling.planning import (
+    write_discovery_plan,
+    write_exploration_plan,
+)
 from vela.preparation.chemistry import (
     chemistry_record_relative_path,
     write_chemistry_record,
@@ -64,12 +67,25 @@ from vela.validation.readiness import (
     ValidationReadiness,
     assess_validation_readiness,
 )
-from vela.validation.refinement.analysis import analyze_refinement_run
+from vela.validation.refinement.analysis import (
+    analyze_funnel_confirmation,
+    analyze_funnel_deep_confirmation,
+    analyze_refinement_run,
+)
 from vela.validation.refinement.execution import run_refinement
 from vela.validation.refinement.guided import run_guided_handoff, write_guided_plan
-from vela.validation.refinement.handoff_plan import write_handoff_plan
+from vela.validation.refinement.handoff_plan import (
+    write_exploration_handoff_plan,
+    write_funnel_screening_handoff_plan,
+    write_handoff_plan,
+    write_source_seed_confirmation_handoff_plan,
+)
 from vela.validation.refinement.handoff_run import run_handoff
-from vela.validation.refinement.planning import write_refinement_plan
+from vela.validation.refinement.planning import (
+    write_funnel_confirmation_plan,
+    write_funnel_deep_plan,
+    write_refinement_plan,
+)
 from vela.validation.refinement.qualification_analysis import (
     analyze_qualification_refinement,
 )
@@ -340,13 +356,11 @@ def discovery_qualification_plan(
     config: AppConfig,
     run_id: str,
     target_id: str,
-    control_run: Path | None,
 ) -> int:
     plan = write_discovery_qualification_plan(
         config=config,
         run_id=run_id,
         target_id=target_id,
-        control_run=control_run,
     )
     print(f"Discovery qualification plan: {plan.run_dir / 'qualification_plan.json'}")
     print(f"Qualification target: {plan.target_id}")
@@ -405,6 +419,23 @@ def discovery_plan(*, config: AppConfig, run_id: str, target_id: str) -> int:
     print(f"Discovery plan written: {plan.run_dir / 'run_manifest.json'}")
     print(f"Discovery target: {plan.target_id}")
     print(f"Planned tasks: {len(plan.tasks)}")
+    return 0
+
+
+def discovery_exploration_plan(
+    *, config: AppConfig, run_id: str, target_id: str, basis_run: Path
+) -> int:
+    """冻结开发性盲发现, 并明确阻止其冒充正式证据。"""
+    plan = write_exploration_plan(
+        config=config,
+        run_id=run_id,
+        target_id=target_id,
+        basis_run=basis_run,
+    )
+    print(f"Exploration plan written: {plan.run_dir / 'run_manifest.json'}")
+    print(f"Exploration target: {plan.target_id}")
+    print(f"Planned tasks: {len(plan.tasks)}")
+    print("Evidence scope: development_only; production claims are prohibited")
     return 0
 
 
@@ -593,7 +624,7 @@ def validation_handoff_plan(
     run_id: str,
     candidate_ids: tuple[str, ...],
 ) -> int:
-    """冻结受支持 blind candidate 的多 seed 全原子交接任务。"""
+    """冻结证据等级预算内 blind candidate 的多 seed 全原子交接任务。"""
     source = _discovery_run_dir(config=config, run_dir=discovery_run)
     plan = write_handoff_plan(
         config=config,
@@ -603,6 +634,80 @@ def validation_handoff_plan(
     )
     print(f"Validation handoff plan written: {plan.run_dir / 'handoff_plan.json'}")
     print(f"Planned handoff tasks: {len(plan.tasks)}")
+    return 0
+
+
+def validation_exploration_handoff_plan(
+    *,
+    config: AppConfig,
+    discovery_run: Path,
+    run_id: str,
+    blind_candidate_ids: tuple[str, ...],
+    functional_candidate_ids: tuple[str, ...],
+) -> int:
+    """冻结探索候选的分支身份、48起点和事前晋级规则。"""
+    source = _discovery_run_dir(config=config, run_dir=discovery_run)
+    plan = write_exploration_handoff_plan(
+        config=config,
+        discovery_run_dir=source,
+        run_id=run_id,
+        blind_candidate_ids=blind_candidate_ids,
+        functional_candidate_ids=functional_candidate_ids,
+    )
+    print(f"Exploration handoff plan written: {plan.run_dir / 'handoff_plan.json'}")
+    print(f"Blind-arm candidates: {len(blind_candidate_ids)}")
+    print(f"Functional-arm candidates: {len(functional_candidate_ids)}")
+    print(f"Planned handoff tasks: {len(plan.tasks)}")
+    print("Evidence scope: development_only; QC metrics cannot rerank candidates")
+    return 0
+
+
+def validation_confirmation_handoff_plan(
+    *,
+    config: AppConfig,
+    discovery_run: Path,
+    run_id: str,
+    candidate_ids: tuple[str, ...],
+) -> int:
+    """冻结单候选的跨 CABS source seed 确认交接。"""
+    if len(candidate_ids) != 1:
+        raise ValidationError("confirmation handoff requires exactly one candidate ID")
+    source = _discovery_run_dir(config=config, run_dir=discovery_run)
+    plan = write_source_seed_confirmation_handoff_plan(
+        config=config,
+        discovery_run_dir=source,
+        run_id=run_id,
+        candidate_id=candidate_ids[0],
+    )
+    print(f"Confirmation handoff plan written: {plan.run_dir / 'handoff_plan.json'}")
+    print(f"Planned distinct-source-seed starts: {len(plan.tasks)}")
+    print("Evidence scope: development_only; production qualification unchanged")
+    return 0
+
+
+def validation_funnel_handoff_plan(
+    *,
+    config: AppConfig,
+    discovery_run: Path,
+    negative_refinement_runs: tuple[Path, ...],
+    run_id: str,
+) -> int:
+    """执行Stage 3A-0审计并冻结跨source筛选的全原子起点。"""
+    source = _discovery_run_dir(config=config, run_dir=discovery_run)
+    plan = write_funnel_screening_handoff_plan(
+        config=config,
+        discovery_run_dir=source,
+        negative_refinement_runs=negative_refinement_runs,
+        run_id=run_id,
+    )
+    print(
+        f"Funnel screening handoff plan written: {plan.run_dir / 'handoff_plan.json'}"
+    )
+    print(
+        f"Stage 3A-0 candidates selected: {len({task.candidate_id for task in plan.tasks})}"
+    )
+    print(f"Stage 3A screening starts planned: {len(plan.tasks)}")
+    print("Rosetta tasks started: 0")
     return 0
 
 
@@ -646,7 +751,13 @@ def validation_qualification_handoff_run(*, config: AppConfig, run_dir: Path) ->
 
 
 def validation_qualification_refinement_plan(
-    *, config: AppConfig, source_run: Path, control_run: Path, run_id: str
+    *,
+    config: AppConfig,
+    source_run: Path,
+    control_run: Path,
+    run_id: str,
+    start_ids: tuple[str, ...],
+    receptor_backbone_mode: str,
 ) -> int:
     """冻结依赖方法阳性对照的 native-aware 阶段二到三恢复诊断。"""
     source = _validation_run_dir(
@@ -660,6 +771,8 @@ def validation_qualification_refinement_plan(
         handoff_run_dir=source,
         control_run_dir=control,
         run_id=run_id,
+        start_ids=start_ids,
+        receptor_backbone_mode=receptor_backbone_mode,
     )
     print(
         "Validation qualification refinement plan written: "
@@ -729,13 +842,60 @@ def _refinement_source_dir(*, config: AppConfig, source_run: Path) -> Path:
 def validation_refinement_plan(
     *, config: AppConfig, source_run: Path, run_id: str
 ) -> int:
-    """冻结已放行的 blind candidate 或 guided 假设局部精修任务。"""
+    """冻结来源身份、候选晋级、起点、seed 和局部精修预算。"""
     source = _refinement_source_dir(config=config, source_run=source_run)
     plan = write_refinement_plan(config=config, source_run_dir=source, run_id=run_id)
     print(
         f"Validation refinement plan written: {plan.run_dir / 'refinement_plan.json'}"
     )
+    print(f"Selected candidates: {', '.join(plan.selected_candidate_ids)}")
+    print(f"Selected all-atom starts: {plan.start_count}")
     print(f"Planned refinement tasks: {len(plan.tasks)}")
+    print(f"Planned refinement decoys: {plan.total_decoy_count}")
+    return 0
+
+
+def validation_funnel_confirmation_plan(
+    *, config: AppConfig, source_run: Path, run_id: str
+) -> int:
+    """冻结Stage 3A命中候选的第二随机流增量任务。"""
+    source = _validation_run_dir(
+        config=config,
+        run_dir=source_run,
+        category="refinements",
+    )
+    plan = write_funnel_confirmation_plan(
+        config=config,
+        screening_run_dir=source,
+        run_id=run_id,
+    )
+    print(f"Stage 3B plan written: {plan.run_dir / 'refinement_plan.json'}")
+    print(f"Selected candidates: {', '.join(plan.selected_candidate_ids)}")
+    print(f"Reused all-atom starts: {plan.start_count}")
+    print(f"Planned new refinement tasks: {len(plan.tasks)}")
+    print(f"Planned new refinement decoys: {plan.total_decoy_count}")
+    return 0
+
+
+def validation_funnel_deep_plan(
+    *, config: AppConfig, source_run: Path, run_id: str
+) -> int:
+    """冻结Stage 3B确认候选的第3和第4条随机流增量任务。"""
+    source = _validation_run_dir(
+        config=config,
+        run_dir=source_run,
+        category="refinements",
+    )
+    plan = write_funnel_deep_plan(
+        config=config,
+        confirmation_run_dir=source,
+        run_id=run_id,
+    )
+    print(f"Stage 3C plan written: {plan.run_dir / 'refinement_plan.json'}")
+    print(f"Selected candidates: {', '.join(plan.selected_candidate_ids)}")
+    print(f"Reused all-atom starts: {plan.start_count}")
+    print(f"Planned new refinement tasks: {len(plan.tasks)}")
+    print(f"Planned new refinement decoys: {plan.total_decoy_count}")
     return 0
 
 
@@ -759,6 +919,42 @@ def validation_refinement_analyze(*, config: AppConfig, run_dir: Path) -> int:
     print(f"Validation refinement analysis: {outcome.manifest_path}")
     print(f"Refined decoys analyzed: {outcome.decoy_count}")
     print(f"Refined clusters: {outcome.cluster_count}")
+    return 0
+
+
+def validation_funnel_confirmation_analyze(*, config: AppConfig, run_dir: Path) -> int:
+    """合并Stage 3A和3B并报告满足3/4任务单元的候选。"""
+    resolved = _validation_run_dir(
+        config=config,
+        run_dir=run_dir,
+        category="refinements",
+    )
+    outcome = analyze_funnel_confirmation(config=config, run_dir=resolved)
+    print(f"Stage 3B analysis: {outcome.manifest_path}")
+    print(f"Combined refined decoys: {outcome.decoy_count}")
+    print(f"Combined refined clusters: {outcome.cluster_count}")
+    print(
+        "Confirmed candidates: "
+        + (", ".join(outcome.confirmed_candidate_ids) or "none")
+    )
+    return 0
+
+
+def validation_funnel_deep_analyze(*, config: AppConfig, run_dir: Path) -> int:
+    """合并Stage 3A至3C并报告最终原子姿态假设。"""
+    resolved = _validation_run_dir(
+        config=config,
+        run_dir=run_dir,
+        category="refinements",
+    )
+    outcome = analyze_funnel_deep_confirmation(config=config, run_dir=resolved)
+    print(f"Stage 3C analysis: {outcome.manifest_path}")
+    print(f"Combined refined decoys: {outcome.decoy_count}")
+    print(f"Combined refined clusters: {outcome.cluster_count}")
+    print(
+        "Final atomic hypotheses: "
+        + (", ".join(outcome.final_hypothesis_cluster_ids) or "none")
+    )
     return 0
 
 

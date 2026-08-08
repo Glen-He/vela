@@ -29,13 +29,20 @@ from vela.discovery.qualification.topology import (
     topology_calibration_contract,
     validate_topology_source_evidence,
 )
-from vela.discovery.readiness import assess_discovery_readiness
+from vela.discovery.readiness import (
+    assess_discovery_exploration_readiness,
+    assess_discovery_readiness,
+)
 from vela.discovery.sampling.cabsdock import build_cabsdock_command
 from vela.discovery.sampling.evidence import (
     candidate_selection_contract,
     collect_cabsdock_evidence,
 )
-from vela.discovery.sampling.planning import build_tasks, write_discovery_plan
+from vela.discovery.sampling.planning import (
+    build_tasks,
+    write_discovery_plan,
+    write_exploration_plan,
+)
 from vela.preparation.chemistry import (
     ChemistryDefinition,
     DisulfideBond,
@@ -107,7 +114,7 @@ def test_topology_source_validation_rejects_changed_cabs_archive(
     task_id = "control__seed_1"
     plan_path = source / "qualification_plan.json"
     plan: dict[str, JsonValue] = {
-        "schema": "vela.discovery-qualification-plan/6",
+        "schema": "vela.discovery-qualification-plan/9",
         "stage": "discovery_qualification",
         "target_id": "test_target",
         "tasks": [{"task_id": task_id}],
@@ -116,7 +123,7 @@ def test_topology_source_validation_rejects_changed_cabs_archive(
     atomic_write_json(
         source / "qualification_sampling.json",
         {
-            "schema": "vela.discovery-qualification-sampling/6",
+            "schema": "vela.discovery-qualification-sampling/9",
             "stage": "discovery_qualification",
             "status": "sampling_completed",
             "target_id": "test_target",
@@ -340,7 +347,7 @@ def _ready_config(tmp_path: Path) -> AppConfig:
         atomic_write_json(
             report_path,
             {
-                "schema": "vela.discovery-qualification-report/8",
+                "schema": "vela.discovery-qualification-report/11",
                 "status": "qualified",
                 "target_id": target_id,
                 "analysis_software": vela_software_identity(),
@@ -350,6 +357,9 @@ def _ready_config(tmp_path: Path) -> AppConfig:
                     "position_distance_A": 4.0,
                     "min_seed_support": 2,
                     "min_receptor_support": 2,
+                    "min_conformation_specific_seed_support": 2,
+                    "ensemble_candidate_budget": 8,
+                    "conformation_specific_candidate_budget": 2,
                 },
             },
         )
@@ -421,15 +431,16 @@ def _ready_config(tmp_path: Path) -> AppConfig:
         qualification=DiscoveryQualificationSettings(
             seeds=(31, 32),
             control_bound_state_id="4IB5_A_D",
-            control_receptor_id="3Q04_A",
+            control_receptor_ids=("3Q04_A", "3QA0_A"),
+            benchmark_receptor_id="5YF9_X",
             control_target_id="ck2_alpha",
             control_secondary_structure="CCCCCCCCCCCCC",
+            receptor_site_diagnostic_budget=8,
             max_native_ligand_rmsd_A=4.0,
             max_native_site_centroid_distance_A=4.0,
             min_native_receptor_contact_fraction=0.2,
-            min_native_sampling_seed_support=1,
             min_native_site_seed_support=1,
-            min_selection_native_seed_recall_fraction=1.0,
+            min_native_receptor_support=1,
             topology_calibration_status="qualified",
             topology_calibration_report=topology_report,
             topology_calibration_report_sha256=sha256_file(topology_report),
@@ -463,6 +474,9 @@ def _ready_config(tmp_path: Path) -> AppConfig:
                     position_distance_A=4.0,
                     min_seed_support=2,
                     min_receptor_support=2,
+                    min_conformation_specific_seed_support=2,
+                    ensemble_candidate_budget=8,
+                    conformation_specific_candidate_budget=2,
                 ),
             ),
             DiscoveryTargetSettings(
@@ -477,6 +491,9 @@ def _ready_config(tmp_path: Path) -> AppConfig:
                     position_distance_A=4.0,
                     min_seed_support=2,
                     min_receptor_support=2,
+                    min_conformation_specific_seed_support=2,
+                    ensemble_candidate_budget=8,
+                    conformation_specific_candidate_budget=2,
                 ),
             ),
         ),
@@ -564,7 +581,7 @@ def test_unqualified_report_is_valid_but_does_not_authorize_production(
     atomic_write_json(
         target.qualification_report,
         {
-            "schema": "vela.discovery-qualification-report/8",
+            "schema": "vela.discovery-qualification-report/11",
             "status": "unqualified",
             "target_id": target.target_id,
             "analysis_software": vela_software_identity(),
@@ -601,6 +618,95 @@ def test_unqualified_report_is_valid_but_does_not_authorize_production(
     assert "qualification_report_mismatch" not in codes
 
 
+def test_exploration_plan_records_unqualified_scope_and_basis(
+    tmp_path: Path,
+) -> None:
+    config = _ready_config(tmp_path)
+    target = config.discovery.target("ck2_alpha")
+    unresolved_target = replace(
+        target,
+        qualification_status="unresolved",
+        qualification_report=None,
+        qualification_report_sha256=None,
+    )
+    config = replace(
+        config,
+        discovery=replace(
+            config.discovery,
+            targets=tuple(
+                unresolved_target if item.target_id == target.target_id else item
+                for item in config.discovery.targets
+            ),
+        ),
+    )
+    basis_run = (
+        config.paths.outputs_dir / "discovery" / "qualifications" / "development-001"
+    )
+    atomic_write_json(
+        basis_run / "qualification_plan.json",
+        {"target_id": "ck2_alpha", "status": "planned"},
+    )
+    atomic_write_json(
+        basis_run / "qualification_sampling.json",
+        {"target_id": "ck2_alpha", "status": "completed"},
+    )
+    atomic_write_json(
+        basis_run / "qualification_report.json",
+        {"target_id": "ck2_alpha", "status": "qualified"},
+    )
+    atomic_write_text(basis_run / "pose_evidence.tsv", "pose_id\n")
+
+    readiness = assess_discovery_exploration_readiness(
+        target_id="ck2_alpha",
+        chemistry=config.chemistry,
+        settings=config.discovery,
+        receptors=config.receptors,
+        audit=config.audit,
+        preparation=config.preparation,
+        data_dir=config.paths.data_dir,
+    )
+    plan = write_exploration_plan(
+        config=config,
+        run_id="exploration-001",
+        target_id="ck2_alpha",
+        basis_run=basis_run,
+    )
+
+    assert readiness.ready
+    assert len(plan.tasks) == 4
+    assert {task.evidence_category for task in plan.tasks} == {"exploratory_discovery"}
+    raw_document: object = json.loads(
+        (plan.run_dir / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    document = object_mapping(raw_document, name="run_manifest")
+    assert document["schema"] == "vela.discovery-run-manifest/8"
+    assert document["evidence_category"] == "exploratory_discovery"
+    inputs = object_mapping(document.get("inputs"), name="inputs")
+    authorization = object_mapping(
+        inputs.get("method_authorization"), name="method authorization"
+    )
+    assert authorization["scope"] == "development_only"
+    assert authorization["production_qualified"] is False
+    assert authorization["independent_holdout_qualified"] is False
+    assert authorization["current_target_qualification_status"] == "unresolved"
+
+
+def test_exploration_plan_rejects_basis_outside_qualification_root(
+    tmp_path: Path,
+) -> None:
+    config = _ready_config(tmp_path)
+
+    with pytest.raises(
+        DiscoveryError, match="outside outputs/discovery/qualifications"
+    ):
+        write_exploration_plan(
+            config=config,
+            run_id="exploration-001",
+            target_id="ck2_alpha",
+            basis_run=tmp_path / "external-basis",
+        )
+
+
 def test_stage_one_readiness_is_independent_of_discovery_method(
     tmp_path: Path,
 ) -> None:
@@ -619,6 +725,9 @@ def test_stage_one_readiness_is_independent_of_discovery_method(
                     position_distance_A=None,
                     min_seed_support=None,
                     min_receptor_support=None,
+                    min_conformation_specific_seed_support=None,
+                    ensemble_candidate_budget=None,
+                    conformation_specific_candidate_budget=None,
                 ),
             ),
         ),

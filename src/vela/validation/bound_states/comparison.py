@@ -43,7 +43,8 @@ class CandidateReplication:
 
     candidate_id: str
     target: str
-    main_supported: bool
+    main_evidence_tier: str
+    main_handoff_eligible: bool
     main_receptor_support: int
     replication_site_ids: tuple[str, ...]
     replication_state_ids: tuple[str, ...]
@@ -120,7 +121,8 @@ def compare_sites(
             CandidateReplication(
                 candidate_id=candidate.candidate_id,
                 target=candidate.target,
-                main_supported=candidate.supported,
+                main_evidence_tier=candidate.evidence_tier,
+                main_handoff_eligible=candidate.handoff_eligible,
                 main_receptor_support=candidate.receptor_support,
                 replication_site_ids=tuple(site.site_id for site in corresponding),
                 replication_state_ids=tuple(
@@ -193,7 +195,8 @@ def compare_replication_run(
             (
                 "candidate_id",
                 "target",
-                "main_supported",
+                "main_evidence_tier",
+                "main_handoff_eligible",
                 "main_receptor_support",
                 "replication_site_ids",
                 "replication_state_ids",
@@ -205,7 +208,8 @@ def compare_replication_run(
                 {
                     "candidate_id": item.candidate_id,
                     "target": item.target,
-                    "main_supported": str(item.main_supported).lower(),
+                    "main_evidence_tier": item.main_evidence_tier,
+                    "main_handoff_eligible": str(item.main_handoff_eligible).lower(),
                     "main_receptor_support": str(item.main_receptor_support),
                     "replication_site_ids": ";".join(item.replication_site_ids),
                     "replication_state_ids": ";".join(item.replication_state_ids),
@@ -252,7 +256,7 @@ def compare_replication_run(
     atomic_write_json(
         manifest_path,
         {
-            "schema": "vela.validation-replication-comparison-manifest/1",
+            "schema": "vela.validation-replication-comparison-manifest/2",
             "stage": "validation_replication_comparison",
             "status": "completed",
             "generated_at": utc_now(),

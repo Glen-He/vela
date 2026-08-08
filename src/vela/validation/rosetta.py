@@ -329,6 +329,7 @@ def build_chemistry_flexpepdock_command(
     nstruct: int,
     scorefile_name: str,
     native_path: Path | None,
+    movemap_path: Path | None,
 ) -> tuple[str, ...]:
     """建立保持端基和微状态的 RosettaScripts FlexPepDock 命令。"""
     if nstruct < 1:
@@ -350,6 +351,8 @@ def build_chemistry_flexpepdock_command(
     command.extend(("-ex1", "-ex2aro", "-use_input_sc", "-packing:no_optH", "true"))
     if native_path is not None:
         command.extend(("-native", str(native_path)))
+    if movemap_path is not None:
+        command.extend(("-in:file:movemap", str(movemap_path)))
     return tuple(command)
 
 

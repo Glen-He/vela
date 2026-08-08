@@ -12,6 +12,11 @@ UNRESOLVED = "unresolved"
 QUALIFICATION_STATUSES = frozenset(
     {UNRESOLVED, "unqualified", "transferability_unresolved", "qualified"}
 )
+SITE_EVIDENCE_TIERS = (
+    "ensemble_consensus",
+    "conformation_specific",
+    "insufficient_evidence",
+)
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -27,6 +32,9 @@ class SiteAnalysisSettings:
     position_distance_A: float | None
     min_seed_support: int | None
     min_receptor_support: int | None
+    min_conformation_specific_seed_support: int | None
+    ensemble_candidate_budget: int | None
+    conformation_specific_candidate_budget: int | None
 
     def __post_init__(self) -> None:
         if (
@@ -41,9 +49,27 @@ class SiteAnalysisSettings:
         for name, value in (
             ("min_seed_support", self.min_seed_support),
             ("min_receptor_support", self.min_receptor_support),
+            (
+                "min_conformation_specific_seed_support",
+                self.min_conformation_specific_seed_support,
+            ),
+            ("ensemble_candidate_budget", self.ensemble_candidate_budget),
+            (
+                "conformation_specific_candidate_budget",
+                self.conformation_specific_candidate_budget,
+            ),
         ):
             if value is not None and value < 1:
                 raise DiscoveryError(f"{name} must be at least 1 or unresolved")
+        if (
+            self.min_seed_support is not None
+            and self.min_conformation_specific_seed_support is not None
+            and self.min_conformation_specific_seed_support < self.min_seed_support
+        ):
+            raise DiscoveryError(
+                "min_conformation_specific_seed_support must be at least "
+                "min_seed_support"
+            )
 
     @property
     def complete(self) -> bool:
@@ -54,6 +80,9 @@ class SiteAnalysisSettings:
                 self.position_distance_A,
                 self.min_seed_support,
                 self.min_receptor_support,
+                self.min_conformation_specific_seed_support,
+                self.ensemble_candidate_budget,
+                self.conformation_specific_candidate_budget,
             )
         )
 
@@ -241,19 +270,20 @@ class TopologyCalibrationSettings:
 
 @dataclass(frozen=True, slots=True)
 class DiscoveryQualificationSettings:
-    """阶段二实验回收控制和技术先导的冻结资格规则。"""
+    """阶段二靶标域 site 回收控制的冻结资格规则。"""
 
     seeds: tuple[int, ...]
     control_bound_state_id: str
-    control_receptor_id: str
+    control_receptor_ids: tuple[str, ...]
+    benchmark_receptor_id: str
     control_target_id: str
     control_secondary_structure: str
+    receptor_site_diagnostic_budget: int
     max_native_ligand_rmsd_A: float
     max_native_site_centroid_distance_A: float
     min_native_receptor_contact_fraction: float
-    min_native_sampling_seed_support: int
     min_native_site_seed_support: int
-    min_selection_native_seed_recall_fraction: float
+    min_native_receptor_support: int
     topology_calibration_status: str
     topology_calibration_report: Path | None
     topology_calibration_report_sha256: str | None
@@ -266,32 +296,42 @@ class DiscoveryQualificationSettings:
             raise DiscoveryError("qualification seeds must not be negative")
         for name, value in (
             ("control_bound_state_id", self.control_bound_state_id),
-            ("control_receptor_id", self.control_receptor_id),
+            ("benchmark_receptor_id", self.benchmark_receptor_id),
             ("control_target_id", self.control_target_id),
         ):
             if not value.strip():
                 raise DiscoveryError(f"{name} must not be empty")
+        if not self.control_receptor_ids or any(
+            not receptor_id.strip() for receptor_id in self.control_receptor_ids
+        ):
+            raise DiscoveryError("control_receptor_ids must contain receptor IDs")
+        if len(self.control_receptor_ids) != len(set(self.control_receptor_ids)):
+            raise DiscoveryError("control_receptor_ids must be unique")
+        if self.benchmark_receptor_id in self.control_receptor_ids:
+            raise DiscoveryError(
+                "benchmark_receptor_id must be separate from production-domain controls"
+            )
         if not self.control_secondary_structure or set(
             self.control_secondary_structure
         ) - {"C", "H", "E", "T"}:
             raise DiscoveryError("control_secondary_structure is invalid")
         if self.max_native_ligand_rmsd_A <= 0:
             raise DiscoveryError("max_native_ligand_rmsd_A must be positive")
+        if self.receptor_site_diagnostic_budget < 1:
+            raise DiscoveryError("receptor_site_diagnostic_budget must be positive")
         if self.max_native_site_centroid_distance_A <= 0:
             raise DiscoveryError("max_native_site_centroid_distance_A must be positive")
         if not 0.0 < self.min_native_receptor_contact_fraction <= 1.0:
             raise DiscoveryError(
                 "min_native_receptor_contact_fraction must be in (0, 1]"
             )
-        for name, value in (
-            ("min_native_sampling_seed_support", self.min_native_sampling_seed_support),
-            ("min_native_site_seed_support", self.min_native_site_seed_support),
-        ):
-            if not 1 <= value <= len(self.seeds):
-                raise DiscoveryError(f"{name} must fit the qualification seed count")
-        if not 0.0 < self.min_selection_native_seed_recall_fraction <= 1.0:
+        if not 1 <= self.min_native_site_seed_support <= len(self.seeds):
             raise DiscoveryError(
-                "min_selection_native_seed_recall_fraction must be in (0, 1]"
+                "min_native_site_seed_support must fit the qualification seed count"
+            )
+        if not 1 <= self.min_native_receptor_support <= len(self.control_receptor_ids):
+            raise DiscoveryError(
+                "min_native_receptor_support must fit the control receptor count"
             )
         if self.topology_calibration_status not in {
             UNRESOLVED,

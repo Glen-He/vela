@@ -25,10 +25,25 @@ from vela.validation.records import (
     validate_record,
 )
 from vela.validation.refinement.handoff_plan import (
+    EXPLORATORY_HANDOFF_EVIDENCE,
+    FUNNEL_SCREENING_HANDOFF_EVIDENCE,
     HANDOFF_PLAN_NAME,
+    HANDOFF_PLAN_SCHEMA,
+    MAIN_HANDOFF_EVIDENCE,
+    POSE_SELECTION_METHOD,
+    POSE_SELECTION_SEED_POLICY,
+    SOURCE_SEED_CONFIRMATION_HANDOFF_EVIDENCE,
+    SOURCE_SEED_CONFIRMATION_POLICY,
+    SOURCE_SEED_CONFIRMATION_SELECTION_METHOD,
     CandidateHandoffTask,
-    build_handoff_tasks,
+    build_funnel_screening_selection,
+    build_handoff_tasks_for_evidence,
+    candidate_evidence_records_for_evidence,
+    exploration_promotion_contract,
+    funnel_screening_contract,
+    handoff_budget_record,
     handoff_task_records,
+    source_seed_confirmation_contract,
 )
 from vela.validation.refinement.reconstruction import (
     validate_flexpepdock_input,
@@ -124,6 +139,68 @@ def _candidate_ids(plan: dict[str, object]) -> tuple[str, ...]:
     return tuple(value for value in values if isinstance(value, str))
 
 
+def _candidate_arms(plan: dict[str, object]) -> dict[str, tuple[str, ...]]:
+    """读取不可变候选分支并验证其恰好覆盖请求集合。"""
+    try:
+        selection = object_mapping(plan.get("selection"), name="handoff selection")
+        raw_arms = object_mapping(
+            selection.get("candidate_arms"), name="candidate arms"
+        )
+    except TypeError as exc:
+        raise ValidationError("handoff candidate arms are invalid") from exc
+    arms: dict[str, tuple[str, ...]] = {}
+    for name, raw_values in raw_arms.items():
+        try:
+            values = object_list(raw_values, name=f"{name} candidate IDs")
+        except TypeError as exc:
+            raise ValidationError("handoff candidate arms are invalid") from exc
+        if any(not isinstance(value, str) for value in values):
+            raise ValidationError("handoff candidate arm IDs must be strings")
+        arms[name] = tuple(value for value in values if isinstance(value, str))
+    flattened = tuple(value for values in arms.values() for value in values)
+    if set(flattened) != set(_candidate_ids(plan)) or len(flattened) != len(
+        set(flattened)
+    ):
+        raise ValidationError("handoff candidate arms do not partition candidates")
+    return arms
+
+
+def _handoff_identity(plan: dict[str, object]) -> tuple[str, str, bool]:
+    """将交接证据收窄为唯一允许的来源类别。"""
+    evidence = plan.get("evidence_category")
+    source = plan.get("source_evidence_category")
+    production = plan.get("production_qualified")
+    if (
+        evidence == MAIN_HANDOFF_EVIDENCE
+        and source == "main_discovery"
+        and production is True
+    ):
+        return MAIN_HANDOFF_EVIDENCE, "main_discovery", True
+    if (
+        evidence == EXPLORATORY_HANDOFF_EVIDENCE
+        and source == "exploratory_discovery"
+        and production is False
+    ):
+        return EXPLORATORY_HANDOFF_EVIDENCE, "exploratory_discovery", False
+    if (
+        evidence == SOURCE_SEED_CONFIRMATION_HANDOFF_EVIDENCE
+        and source == "exploratory_discovery"
+        and production is False
+    ):
+        return (
+            SOURCE_SEED_CONFIRMATION_HANDOFF_EVIDENCE,
+            "exploratory_discovery",
+            False,
+        )
+    if (
+        evidence == FUNNEL_SCREENING_HANDOFF_EVIDENCE
+        and source == "exploratory_discovery"
+        and production is False
+    ):
+        return FUNNEL_SCREENING_HANDOFF_EVIDENCE, "exploratory_discovery", False
+    raise ValidationError("handoff evidence identity is invalid")
+
+
 def _discovery_run_dir(*, config: AppConfig, plan: dict[str, object]) -> Path:
     try:
         inputs = object_mapping(plan.get("inputs"), name="handoff inputs")
@@ -151,13 +228,14 @@ def _verify_plan(
 ) -> tuple[dict[str, object], tuple[CandidateHandoffTask, ...]]:
     plan = read_document(run_dir / HANDOFF_PLAN_NAME, name="handoff plan")
     if (
-        plan.get("schema") != "vela.validation-handoff-plan/6"
+        plan.get("schema") != HANDOFF_PLAN_SCHEMA
         or plan.get("stage") != "validation_candidate_handoff"
         or plan.get("status") != "planned"
         or not is_current_vela_software(plan.get("software"))
         or plan.get("chemistry_id") != config.chemistry.chemistry_id
     ):
         raise ValidationError("handoff plan identity is invalid")
+    _, discovery_evidence, production_qualified = _handoff_identity(plan)
     try:
         inputs = object_mapping(plan.get("inputs"), name="handoff inputs")
         snapshot = object_mapping(inputs.get("config_snapshot"), name="config snapshot")
@@ -170,11 +248,115 @@ def _verify_plan(
     if sha256_file(snapshot_path) != config.source_snapshot_sha256:
         raise ValidationError("current project config differs from the handoff plan")
     discovery_run = _discovery_run_dir(config=config, plan=plan)
-    tasks = build_handoff_tasks(
-        config=config,
+    candidate_ids = _candidate_ids(plan)
+    candidate_arms = _candidate_arms(plan)
+    evidence = plan.get("evidence_category")
+    confirmation = evidence == SOURCE_SEED_CONFIRMATION_HANDOFF_EVIDENCE
+    try:
+        selection = object_mapping(plan.get("selection"), name="handoff selection")
+    except TypeError as exc:
+        raise ValidationError("handoff selection is invalid") from exc
+    candidate_evidence = candidate_evidence_records_for_evidence(
         discovery_run_dir=discovery_run,
-        candidate_ids=_candidate_ids(plan),
+        candidate_ids=candidate_ids,
+        expected_evidence_category=discovery_evidence,
     )
+    if selection.get("candidate_evidence") != candidate_evidence:
+        raise ValidationError("handoff candidate evidence differs from the frozen plan")
+    funnel_screening = evidence == FUNNEL_SCREENING_HANDOFF_EVIDENCE
+    expected_arms: dict[str, tuple[str, ...]]
+    expected_promotion: dict[str, JsonValue]
+    expected_pose_selection: str
+    expected_seed_policy: str
+    if funnel_screening:
+        try:
+            audit = object_mapping(selection.get("funnel_audit"), name="funnel audit")
+            negative_rows = object_list(
+                audit.get("negative_refinement_analyses"),
+                name="negative refinement analyses",
+            )
+        except TypeError as exc:
+            raise ValidationError("funnel audit is invalid") from exc
+        negative_runs: list[Path] = []
+        for raw in negative_rows:
+            try:
+                record = object_mapping(raw, name="negative refinement analysis")
+            except TypeError as exc:
+                raise ValidationError(
+                    "negative refinement analysis is invalid"
+                ) from exc
+            relative = record.get("run_dir")
+            if not isinstance(relative, str):
+                raise ValidationError("negative refinement run path is invalid")
+            negative_runs.append((config.paths.outputs_dir / relative).resolve())
+        frozen = build_funnel_screening_selection(
+            config=config,
+            discovery_run_dir=discovery_run,
+            negative_refinement_runs=tuple(negative_runs),
+        )
+        tasks = frozen.tasks
+        expected_arms = frozen.candidate_arms
+        expected_promotion = funnel_screening_contract(config)
+        expected_pose_selection = "top_cross_source_pose_family_seed_medoids"
+        expected_seed_policy = "two_distinct_source_seeds_within_one_pose_family"
+        if selection.get("funnel_audit") != frozen.audit:
+            raise ValidationError("funnel audit differs from the frozen plan")
+    else:
+        tasks = build_handoff_tasks_for_evidence(
+            config=config,
+            discovery_run_dir=discovery_run,
+            candidate_ids=candidate_ids,
+            expected_evidence_category=discovery_evidence,
+            require_distinct_source_seeds=confirmation,
+        )
+        if production_qualified:
+            expected_arms = {"blind_discovery_arm": candidate_ids}
+            expected_promotion = {
+                "mode": "explicit_formal_candidate_selection",
+                "qc_metrics_used_for_candidate_reranking": False,
+            }
+            expected_pose_selection = POSE_SELECTION_METHOD
+            expected_seed_policy = POSE_SELECTION_SEED_POLICY
+        elif confirmation:
+            expected_arms = {"source_seed_confirmation_arm": candidate_ids}
+            expected_promotion = source_seed_confirmation_contract(config)
+            expected_pose_selection = SOURCE_SEED_CONFIRMATION_SELECTION_METHOD
+            expected_seed_policy = SOURCE_SEED_CONFIRMATION_POLICY
+        else:
+            expected_arms = {
+                "blind_discovery_arm": candidate_arms.get("blind_discovery_arm", ()),
+                "functional_annotation_arm": candidate_arms.get(
+                    "functional_annotation_arm", ()
+                ),
+            }
+            expected_promotion = exploration_promotion_contract(config)
+            expected_pose_selection = POSE_SELECTION_METHOD
+            expected_seed_policy = POSE_SELECTION_SEED_POLICY
+    if candidate_arms != expected_arms:
+        raise ValidationError("handoff candidate arms differ from the evidence scope")
+    if selection.get("promotion_contract") != expected_promotion:
+        raise ValidationError("handoff promotion contract differs from the frozen plan")
+    if (
+        selection.get("pose_selection") != expected_pose_selection
+        or selection.get("source_seed_policy") != expected_seed_policy
+    ):
+        raise ValidationError("handoff pose selection differs from the frozen plan")
+    if selection.get("budget") != handoff_budget_record(
+        config=config,
+        tasks=tasks,
+        candidate_count=len(candidate_evidence),
+        refinement_seed_count=(
+            config.validation.refinement.seed_batch_sizes[0]
+            if funnel_screening
+            else None
+        ),
+        refinement_mode=(
+            "stage3a_incremental_screening"
+            if funnel_screening
+            else "qualified_full_protocol_only"
+        ),
+    ):
+        raise ValidationError("handoff compute budget differs from the frozen plan")
     for raw in recorded_tasks:
         try:
             row = object_mapping(raw, name="handoff task")
@@ -497,7 +679,8 @@ def run_handoff(*, config: AppConfig, run_dir: Path) -> HandoffOutcome:
     manifest_path = run_dir / "handoff_manifest.json"
     if manifest_path.exists():
         raise ValidationError(f"handoff manifest already exists: {manifest_path}")
-    _, tasks = _verify_plan(config=config, run_dir=run_dir)
+    plan, tasks = _verify_plan(config=config, run_dir=run_dir)
+    handoff_evidence, source_evidence, production_qualified = _handoff_identity(plan)
     plan_path = run_dir / HANDOFF_PLAN_NAME
     plan_sha256 = sha256_file(plan_path)
     results = execute_handoff_tasks(
@@ -510,7 +693,7 @@ def run_handoff(*, config: AppConfig, run_dir: Path) -> HandoffOutcome:
     atomic_write_json(
         manifest_path,
         {
-            "schema": "vela.validation-handoff-manifest/7",
+            "schema": "vela.validation-handoff-manifest/8",
             "stage": "validation_candidate_handoff",
             "status": (
                 "invalid"
@@ -519,7 +702,9 @@ def run_handoff(*, config: AppConfig, run_dir: Path) -> HandoffOutcome:
             ),
             "completed_at": utc_now(),
             "chemistry_id": config.chemistry.chemistry_id,
-            "evidence_category": "main_discovery_handoff",
+            "evidence_category": handoff_evidence,
+            "source_evidence_category": source_evidence,
+            "production_qualified": production_qualified,
             "known_site_information_used": False,
             "parallel_tasks": min(config.validation.rosetta.parallel_tasks, len(tasks)),
             "handoff_plan": {

@@ -63,7 +63,7 @@ def _run_seed_cases(
     tool_version: str,
     selection: CandidateSelectionSettings,
 ) -> tuple[tuple[str, CabsDockEvidence], ...]:
-    """一个 worker 顺序完成同一 seed 的阳性控制和技术先导。"""
+    """一个 worker 顺序完成同一 seed 在全部控制受体上的任务。"""
     return tuple(
         (
             case.task.task_id,
@@ -102,7 +102,7 @@ def _metrics_table(rows: list[dict[str, str]]) -> str:
 
 
 def run_qualification(*, config: AppConfig, run_dir: Path) -> None:
-    """执行资格计划, 写出控制/先导 pose 和实验回收指标。"""
+    """执行资格计划, 写出多受体位点控制的原始证据。"""
     plan_path = run_dir / "qualification_plan.json"
     plan = _document(plan_path)
     target_id = plan.get("target_id")
@@ -133,11 +133,7 @@ def run_qualification(*, config: AppConfig, run_dir: Path) -> None:
         raise DiscoveryError(
             "current CABS-dock parameters differ from the qualification plan"
         )
-    cases = build_qualification_cases(
-        config=config,
-        target_id=target_id,
-        include_control=plan.get("shared_control") is None,
-    )
+    cases = build_qualification_cases(config=config, target_id=target_id)
     records = case_records(cases=cases, data_dir=config.paths.data_dir)
     if plan.get("tasks") != records or plan.get("task_count") != len(cases):
         raise DiscoveryError("qualification tasks differ from the frozen plan")
@@ -226,6 +222,9 @@ def run_qualification(*, config: AppConfig, run_dir: Path) -> None:
                 max_ligand_ca_rmsd_A=(
                     config.discovery.qualification.max_native_ligand_rmsd_A
                 ),
+                max_native_site_centroid_distance_A=(
+                    config.discovery.qualification.max_native_site_centroid_distance_A
+                ),
                 max_reconstructable_disulfide_ca_distance_A=(
                     config.discovery.cabsdock.max_reconstructable_disulfide_ca_distance_A
                 ),
@@ -253,11 +252,17 @@ def run_qualification(*, config: AppConfig, run_dir: Path) -> None:
                 "filtered_topology_feasible_recovered_model_count": (
                     native_filter_audit.filtered_topology_feasible_recovered_model_count
                 ),
-                "trajectory_qualified_recovered_model_count": (
-                    native_filter_audit.trajectory_qualified_recovered_model_count
+                "trajectory_site_recovered_model_count": (
+                    native_filter_audit.trajectory_site_recovered_model_count
                 ),
-                "filtered_qualified_recovered_model_count": (
-                    native_filter_audit.filtered_qualified_recovered_model_count
+                "trajectory_topology_feasible_site_recovered_model_count": (
+                    native_filter_audit.trajectory_topology_feasible_site_recovered_model_count
+                ),
+                "filtered_site_recovered_model_count": (
+                    native_filter_audit.filtered_site_recovered_model_count
+                ),
+                "filtered_topology_feasible_site_recovered_model_count": (
+                    native_filter_audit.filtered_topology_feasible_site_recovered_model_count
                 ),
                 "trajectory_best_ligand_ca_rmsd_A": (
                     native_filter_audit.trajectory_best_ligand_ca_rmsd_A
@@ -265,11 +270,17 @@ def run_qualification(*, config: AppConfig, run_dir: Path) -> None:
                 "trajectory_best_native_receptor_contact_fraction": (
                     native_filter_audit.trajectory_best_native_receptor_contact_fraction
                 ),
+                "trajectory_best_ligand_centroid_distance_A": (
+                    native_filter_audit.trajectory_best_ligand_centroid_distance_A
+                ),
                 "filtered_best_ligand_ca_rmsd_A": (
                     native_filter_audit.filtered_best_ligand_ca_rmsd_A
                 ),
                 "filtered_best_native_receptor_contact_fraction": (
                     native_filter_audit.filtered_best_native_receptor_contact_fraction
+                ),
+                "filtered_best_ligand_centroid_distance_A": (
+                    native_filter_audit.filtered_best_ligand_centroid_distance_A
                 ),
             }
             comparison_sets = (

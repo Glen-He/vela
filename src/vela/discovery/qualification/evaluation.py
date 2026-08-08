@@ -37,7 +37,7 @@ class NativePoseMetrics:
 
 @dataclass(frozen=True, slots=True)
 class NativeTrajectoryAudit:
-    """CABS 能量过滤前后以 L-RMSD 衡量的实验位点保留情况。"""
+    """CABS 能量过滤前后的位点访问与精确姿态诊断。"""
 
     trajectory_model_count: int
     trajectory_recovered_model_count: int
@@ -45,12 +45,16 @@ class NativeTrajectoryAudit:
     filtered_model_count: int
     filtered_recovered_model_count: int
     filtered_topology_feasible_recovered_model_count: int
-    trajectory_qualified_recovered_model_count: int
-    filtered_qualified_recovered_model_count: int
+    trajectory_site_recovered_model_count: int
+    trajectory_topology_feasible_site_recovered_model_count: int
+    filtered_site_recovered_model_count: int
+    filtered_topology_feasible_site_recovered_model_count: int
     trajectory_best_ligand_ca_rmsd_A: float | None
     trajectory_best_native_receptor_contact_fraction: float | None
+    trajectory_best_ligand_centroid_distance_A: float | None
     filtered_best_ligand_ca_rmsd_A: float | None
     filtered_best_native_receptor_contact_fraction: float | None
+    filtered_best_ligand_centroid_distance_A: float | None
 
 
 def _raw_receptor_alignment_indices(
@@ -128,6 +132,7 @@ def audit_native_recovery_before_filtering(
     native_pair_path: Path,
     chemistry: ChemistryDefinition,
     max_ligand_ca_rmsd_A: float,
+    max_native_site_centroid_distance_A: float,
     max_reconstructable_disulfide_ca_distance_A: float,
     contact_ca_threshold_A: float,
     min_native_receptor_contact_fraction: float,
@@ -158,9 +163,16 @@ def audit_native_recovery_before_filtering(
     trajectory_count = 0
     trajectory_recovered = 0
     trajectory_topology_recovered = 0
-    trajectory_qualified_recovered = 0
+    trajectory_site_recovered = 0
+    trajectory_topology_site_recovered = 0
     trajectory_best_rmsd: float | None = None
     trajectory_best_contact: float | None = None
+    trajectory_best_centroid: float | None = None
+    native_centroid = gemmi.Position(
+        *centroid(
+            tuple((position.x, position.y, position.z) for position in native_positions)
+        )
+    )
     for frame in iter_cabs_trajectory(archive_path=archive_path, chains=chains):
         trajectory_count += 1
         receptor = frame.chain_ca[0]
@@ -173,6 +185,14 @@ def audit_native_recovery_before_filtering(
             for position in frame.chain_ca[-1]
         )
         ligand_rmsd = _positions_rmsd(moving_peptide, native_positions)
+        moving_centroid = gemmi.Position(
+            *centroid(
+                tuple(
+                    (position.x, position.y, position.z) for position in moving_peptide
+                )
+            )
+        )
+        centroid_distance = moving_centroid.dist(native_centroid)
         topology_feasible = (
             _raw_topology_distance(frame.chain_ca[-1], chemistry=chemistry)
             <= max_reconstructable_disulfide_ca_distance_A
@@ -202,20 +222,33 @@ def audit_native_recovery_before_filtering(
                 if trajectory_best_contact is None
                 else max(trajectory_best_contact, contact_fraction)
             )
+            trajectory_best_centroid = (
+                centroid_distance
+                if trajectory_best_centroid is None
+                else min(trajectory_best_centroid, centroid_distance)
+            )
+        site_recovered = (
+            centroid_distance <= max_native_site_centroid_distance_A
+            and contact_fraction >= min_native_receptor_contact_fraction
+        )
+        if site_recovered:
+            trajectory_site_recovered += 1
+            if topology_feasible:
+                trajectory_topology_site_recovered += 1
         recovered = ligand_rmsd <= max_ligand_ca_rmsd_A
         if recovered:
             trajectory_recovered += 1
             if topology_feasible:
                 trajectory_topology_recovered += 1
-                if contact_fraction >= min_native_receptor_contact_fraction:
-                    trajectory_qualified_recovered += 1
 
     filtered = read_structure(filtered_path)
     filtered_recovered = 0
     filtered_topology_recovered = 0
-    filtered_qualified_recovered = 0
+    filtered_site_recovered = 0
+    filtered_topology_site_recovered = 0
     filtered_best_rmsd: float | None = None
     filtered_best_contact: float | None = None
+    filtered_best_centroid: float | None = None
     for model in filtered:
         receptor, peptide = split_model(model, peptide_sequence=chemistry.sequence)
         alignment = align_receptor(
@@ -227,6 +260,14 @@ def audit_native_recovery_before_filtering(
             for residue in peptide
         )
         ligand_rmsd = _positions_rmsd(moving_peptide, native_positions)
+        moving_centroid = gemmi.Position(
+            *centroid(
+                tuple(
+                    (position.x, position.y, position.z) for position in moving_peptide
+                )
+            )
+        )
+        centroid_distance = moving_centroid.dist(native_centroid)
         pose_contacts = ca_contact_residues(
             receptor=receptor,
             peptide=peptide,
@@ -254,13 +295,24 @@ def audit_native_recovery_before_filtering(
                 if filtered_best_contact is None
                 else max(filtered_best_contact, contact_fraction)
             )
+            filtered_best_centroid = (
+                centroid_distance
+                if filtered_best_centroid is None
+                else min(filtered_best_centroid, centroid_distance)
+            )
+        site_recovered = (
+            centroid_distance <= max_native_site_centroid_distance_A
+            and contact_fraction >= min_native_receptor_contact_fraction
+        )
+        if site_recovered:
+            filtered_site_recovered += 1
+            if topology_feasible:
+                filtered_topology_site_recovered += 1
         recovered = ligand_rmsd <= max_ligand_ca_rmsd_A
         if recovered:
             filtered_recovered += 1
             if topology_feasible:
                 filtered_topology_recovered += 1
-                if contact_fraction >= min_native_receptor_contact_fraction:
-                    filtered_qualified_recovered += 1
     return NativeTrajectoryAudit(
         trajectory_model_count=trajectory_count,
         trajectory_recovered_model_count=trajectory_recovered,
@@ -270,12 +322,20 @@ def audit_native_recovery_before_filtering(
         filtered_model_count=len(filtered),
         filtered_recovered_model_count=filtered_recovered,
         filtered_topology_feasible_recovered_model_count=(filtered_topology_recovered),
-        trajectory_qualified_recovered_model_count=(trajectory_qualified_recovered),
-        filtered_qualified_recovered_model_count=filtered_qualified_recovered,
+        trajectory_site_recovered_model_count=trajectory_site_recovered,
+        trajectory_topology_feasible_site_recovered_model_count=(
+            trajectory_topology_site_recovered
+        ),
+        filtered_site_recovered_model_count=filtered_site_recovered,
+        filtered_topology_feasible_site_recovered_model_count=(
+            filtered_topology_site_recovered
+        ),
         trajectory_best_ligand_ca_rmsd_A=trajectory_best_rmsd,
         trajectory_best_native_receptor_contact_fraction=trajectory_best_contact,
+        trajectory_best_ligand_centroid_distance_A=trajectory_best_centroid,
         filtered_best_ligand_ca_rmsd_A=filtered_best_rmsd,
         filtered_best_native_receptor_contact_fraction=filtered_best_contact,
+        filtered_best_ligand_centroid_distance_A=filtered_best_centroid,
     )
 
 

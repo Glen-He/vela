@@ -1,4 +1,4 @@
-"""阶段二到阶段三 native-aware 开发诊断的事后分析。"""
+"""Cross-receptor native-aware 开发诊断的事后分析。"""
 
 from __future__ import annotations
 
@@ -35,6 +35,7 @@ from vela.validation.records import (
     validate_record,
 )
 from vela.validation.refinement.qualification_diagnostic import (
+    EVIDENCE_CATEGORY,
     MANIFEST_NAME,
     MANIFEST_SCHEMA,
     PLAN_NAME,
@@ -46,7 +47,7 @@ from vela.validation.scores import read_rosetta_scorefile
 
 ANALYSIS_DIRECTORY = "qualification_refinement_analysis"
 REPORT_NAME = "analysis_report.json"
-REPORT_SCHEMA = "vela.validation-qualification-refinement-analysis-report/2"
+REPORT_SCHEMA = "vela.validation-qualification-refinement-analysis-report/3"
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +151,40 @@ def _parameters(plan: dict[str, object]) -> dict[str, object]:
         raise ValidationError("diagnostic parameters are invalid") from exc
 
 
+def _receptor_backbone_parameters(
+    parameters: dict[str, object],
+) -> dict[str, JsonValue]:
+    try:
+        raw = object_mapping(
+            parameters.get("receptor_backbone"),
+            name="diagnostic receptor backbone protocol",
+        )
+    except TypeError as exc:
+        raise ValidationError(
+            "diagnostic receptor backbone protocol is invalid"
+        ) from exc
+    mode = _text(raw.get("mode"), name="receptor backbone mode")
+    if mode not in {"fixed", "local_constrained"}:
+        raise ValidationError("diagnostic receptor backbone mode is invalid")
+    return {
+        "mode": mode,
+        "selection": _text(raw.get("selection"), name="receptor backbone selection"),
+        "contact_A": _number(
+            raw.get("contact_A"), name="receptor backbone contact", positive=True
+        ),
+        "sequence_padding": _integer(
+            raw.get("sequence_padding"), name="receptor backbone sequence padding"
+        ),
+        "movemap_policy": _text(
+            raw.get("movemap_policy"), name="receptor backbone MoveMap policy"
+        ),
+        "coordinate_constraint": _text(
+            raw.get("coordinate_constraint"),
+            name="receptor backbone coordinate constraint",
+        ),
+    }
+
+
 def _plan_tasks(plan: dict[str, object]) -> tuple[AnalysisTask, ...]:
     try:
         rows = object_list(plan.get("tasks"), name="diagnostic plan tasks")
@@ -213,6 +248,10 @@ def _validated_run(
         or manifest.get("chemistry") != plan.get("chemistry")
     ):
         raise ValidationError("qualification refinement manifest identity is invalid")
+    parameters = _parameters(plan)
+    backbone = _receptor_backbone_parameters(parameters)
+    if manifest.get("receptor_backbone_mode") != backbone.get("mode"):
+        raise ValidationError("diagnostic receptor backbone identity is inconsistent")
     frozen_plan, plan_hash = validate_record(
         root=run_dir,
         raw=manifest.get("qualification_refinement_plan"),
@@ -223,7 +262,6 @@ def _validated_run(
     tasks = _plan_tasks(plan)
     if manifest.get("task_count") != len(tasks):
         raise ValidationError("diagnostic manifest task count is inconsistent")
-    parameters = _parameters(plan)
     expected_decoys = len(tasks) * _integer(
         parameters.get("decoys_per_seed"),
         name="decoys per seed",
@@ -915,6 +953,7 @@ def analyze_qualification_refinement(
         config=config, run_dir=run_dir
     )
     parameters = _parameters(plan)
+    receptor_backbone = _receptor_backbone_parameters(parameters)
     expected_per_task = _integer(
         parameters.get("decoys_per_seed"), name="decoys per seed", minimum=1
     )
@@ -1066,7 +1105,7 @@ def analyze_qualification_refinement(
             "development_only": True,
             "formal_qualification_gate": False,
             "native_information_used": True,
-            "evidence_category": ("native_aware_qualification_refinement_diagnostic"),
+            "evidence_category": EVIDENCE_CATEGORY,
             "scientific_result": (
                 "recovery_supported" if recovery_supported else "recovery_not_supported"
             ),
@@ -1080,6 +1119,7 @@ def analyze_qualification_refinement(
                 "cluster_ranking": (
                     "best_ranking_score_asc_then_decoy_id; no frozen Top-K gate"
                 ),
+                "receptor_backbone": receptor_backbone,
             },
             "source": {
                 "qualification_refinement_plan": {
@@ -1111,10 +1151,10 @@ def analyze_qualification_refinement(
                 "delivered_exact_pose_successful_seeds": list(delivered_exact_seeds),
                 "source_exact_pose_seed_delivered": bool(delivered_exact_seeds),
                 "interpretation": (
-                    "The frozen native-free two-start-per-site handoff delivered "
+                    "The frozen native-free handoff delivered "
                     "at least one start from a strict CABS recovery seed."
                     if delivered_exact_seeds
-                    else "The frozen native-free two-start-per-site handoff did not "
+                    else "The frozen native-free handoff did not "
                     "deliver a start from any strict CABS recovery seed."
                 ),
             },
@@ -1133,7 +1173,7 @@ def analyze_qualification_refinement(
                 "recommended_next_action": (
                     "freeze_joint_contract_then_run_unseen_holdout"
                     if recovery_supported
-                    else "develop_local_capture_range_before_new_holdout"
+                    else "no_required_action_cross_receptor_robustness_optional"
                 ),
             },
             "artifacts": {

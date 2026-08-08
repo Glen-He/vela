@@ -1,21 +1,34 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from vela.discovery.analysis.cluster_engine import complete_linkage
 from vela.discovery.analysis.clustering import analyze_sites
 from vela.discovery.analysis.evidence import PoseEvidence
 from vela.discovery.models import DiscoveryError, SiteAnalysisSettings
-from vela.discovery.qualification.analysis import (
-    best_native_coherent_site_evidence,
-    selection_seed_recall,
-)
 
 SETTINGS = SiteAnalysisSettings(
     contact_jaccard_distance=0.5,
     position_distance_A=2.0,
     min_seed_support=2,
     min_receptor_support=2,
+    min_conformation_specific_seed_support=2,
+    ensemble_candidate_budget=1,
+    conformation_specific_candidate_budget=1,
 )
+
+
+def test_complete_linkage_preserves_diameter_threshold_and_order() -> None:
+    positions = {"a": 0.0, "b": 0.2, "c": 0.8, "d": 2.0, "e": 2.4}
+
+    clusters = complete_linkage(
+        tuple(reversed(tuple(positions))),
+        distance=lambda first, second: abs(positions[first] - positions[second]),
+        identity=lambda item: item,
+    )
+
+    assert clusters == [("a", "b", "c"), ("d", "e")]
 
 
 def _pose(
@@ -27,6 +40,8 @@ def _pose(
     contacts: frozenset[str],
     x: float,
     frame: str,
+    score: float = -10.0,
+    score_name: str = "test_score",
 ) -> PoseEvidence:
     return PoseEvidence(
         task_id=f"{receptor}__seed_{seed}",
@@ -40,8 +55,8 @@ def _pose(
         contact_residues=contacts,
         local_position=(x, 0.0, 0.0),
         coordinate_frame_id=frame,
-        ranking_score=-10.0,
-        score_name="test_score",
+        ranking_score=score,
+        score_name=score_name,
         qc_status="passed",
     )
 
@@ -117,7 +132,11 @@ def test_site_support_counts_independent_seeds_and_receptor_conformations() -> N
     candidate = result.candidate_sites[0]
     assert candidate.receptor_ids == ("3Q04_A", "3QA0_A")
     assert candidate.receptor_support == 2
-    assert candidate.supported
+    assert candidate.evidence_tier == "ensemble_consensus"
+    assert candidate.rank_within_tier == 1
+    assert candidate.minimum_seed_support == 2
+    assert candidate.total_seed_support == 4
+    assert candidate.handoff_eligible
 
 
 def test_analysis_never_combines_subtypes() -> None:
@@ -146,7 +165,10 @@ def test_analysis_never_combines_subtypes() -> None:
         "ck2_alpha_prime",
     }
     assert all(site.receptor_support == 1 for site in result.candidate_sites)
-    assert not any(site.supported for site in result.candidate_sites)
+    assert all(
+        site.evidence_tier == "conformation_specific" for site in result.candidate_sites
+    )
+    assert all(site.handoff_eligible for site in result.candidate_sites)
 
 
 def test_analysis_rejects_inconsistent_coordinate_frames_within_target() -> None:
@@ -176,83 +198,138 @@ def test_analysis_rejects_inconsistent_coordinate_frames_within_target() -> None
         analyze_sites(poses=poses, settings=SETTINGS)
 
 
-def test_native_site_support_requires_pairwise_compatible_poses() -> None:
-    contacts = frozenset({"A:10", "A:11"})
-    poses = {
-        pose.pose_id: pose
-        for pose in (
-            _pose(
-                "a_anchor",
-                receptor="3Q04_A",
-                target="ck2_alpha",
-                seed=1,
-                contacts=contacts,
-                x=0.0,
-                frame="3Q04_A",
-            ),
-            _pose(
-                "b_left",
-                receptor="3Q04_A",
-                target="ck2_alpha",
-                seed=2,
-                contacts=contacts,
-                x=-1.8,
-                frame="3Q04_A",
-            ),
-            _pose(
-                "c_right",
-                receptor="3Q04_A",
-                target="ck2_alpha",
-                seed=3,
-                contacts=contacts,
-                x=1.8,
-                frame="3Q04_A",
-            ),
+def test_candidate_ranking_enforces_tier_budget() -> None:
+    frame = "ck2_alpha_reference_v1"
+    poses = tuple(
+        _pose(
+            f"{receptor}_{site}_{seed}",
+            receptor=receptor,
+            target="ck2_alpha",
+            seed=seed,
+            contacts=contacts,
+            x=x,
+            frame=frame,
         )
+        for receptor in ("3Q04_A", "3QA0_A")
+        for site, seeds, contacts, x in (
+            ("strong", (1, 2, 3), frozenset({"A:10", "A:11"}), 0.0),
+            ("weak", (1, 2), frozenset({"A:100", "A:101"}), 10.0),
+        )
+        for seed in seeds
+    )
+
+    result = analyze_sites(poses=poses, settings=SETTINGS)
+    ensemble = sorted(
+        (
+            candidate
+            for candidate in result.candidate_sites
+            if candidate.evidence_tier == "ensemble_consensus"
+        ),
+        key=lambda candidate: candidate.rank_within_tier,
+    )
+
+    assert [candidate.minimum_seed_support for candidate in ensemble] == [3, 2]
+    assert [candidate.handoff_eligible for candidate in ensemble] == [True, False]
+
+
+def test_candidate_score_tiebreak_is_invariant_to_receptor_score_scale() -> None:
+    frame = "ck2_alpha_reference_v1"
+
+    def poses(*, transform_second: bool) -> tuple[PoseEvidence, ...]:
+        rows: list[PoseEvidence] = []
+        for receptor in ("3Q04_A", "3QA0_A"):
+            for site, contacts, x, score in (
+                ("first", frozenset({"A:10"}), 0.0, -30.0),
+                ("second", frozenset({"A:100"}), 20.0, -20.0),
+                ("third", frozenset({"A:200"}), 40.0, -10.0),
+            ):
+                receptor_score = score
+                if receptor == "3QA0_A" and transform_second:
+                    receptor_score = score * 100.0 + 1_000_000.0
+                for seed in (1, 2):
+                    rows.append(
+                        _pose(
+                            f"{receptor}_{site}_{seed}",
+                            receptor=receptor,
+                            target="ck2_alpha",
+                            seed=seed,
+                            contacts=contacts,
+                            x=x,
+                            frame=frame,
+                            score=receptor_score,
+                        )
+                    )
+        return tuple(rows)
+
+    original = analyze_sites(poses=poses(transform_second=False), settings=SETTINGS)
+    transformed = analyze_sites(poses=poses(transform_second=True), settings=SETTINGS)
+
+    original_metrics = {
+        candidate.candidate_id: (
+            candidate.rank_within_tier,
+            candidate.median_receptor_score_quantile,
+        )
+        for candidate in original.candidate_sites
     }
+    transformed_metrics = {
+        candidate.candidate_id: (
+            candidate.rank_within_tier,
+            candidate.median_receptor_score_quantile,
+        )
+        for candidate in transformed.candidate_sites
+    }
+    assert transformed_metrics == original_metrics
 
-    seed_support, precision = best_native_coherent_site_evidence(
-        recovered=set(poses),
-        poses=poses,
-        contact_limit=0.5,
-        position_limit=2.0,
+
+def test_candidate_analysis_rejects_mixed_score_identities_per_receptor() -> None:
+    poses = (
+        _pose(
+            "first",
+            receptor="3Q04_A",
+            target="ck2_alpha",
+            seed=1,
+            contacts=frozenset({"A:10"}),
+            x=0.0,
+            frame="ck2_alpha_reference_v1",
+            score_name="first_score",
+        ),
+        _pose(
+            "second",
+            receptor="3Q04_A",
+            target="ck2_alpha",
+            seed=2,
+            contacts=frozenset({"A:10"}),
+            x=0.1,
+            frame="ck2_alpha_reference_v1",
+            score_name="second_score",
+        ),
     )
 
-    assert seed_support == 2
-    assert precision == 1.0
+    with pytest.raises(DiscoveryError, match="share one ranking score"):
+        analyze_sites(poses=poses, settings=SETTINGS)
 
 
-def test_selection_seed_recall_allows_additional_site_only_seeds() -> None:
-    recall = selection_seed_recall(
-        sampling_seeds=(120666,),
-        selection_site_seeds=(120664, 120666, 120667),
+def test_conformation_specific_tier_requires_stronger_seed_support() -> None:
+    settings = replace(SETTINGS, min_conformation_specific_seed_support=4)
+    poses = tuple(
+        _pose(
+            f"site_{site}_{seed}",
+            receptor="3Q04_A",
+            target="ck2_alpha",
+            seed=seed,
+            contacts=contacts,
+            x=x,
+            frame="ck2_alpha_reference_v1",
+        )
+        for site, seeds, contacts, x in (
+            ("strong", (1, 2, 3, 4), frozenset({"A:10", "A:11"}), 0.0),
+            ("weak", (1, 2, 3), frozenset({"A:100", "A:101"}), 10.0),
+        )
+        for seed in seeds
     )
 
-    assert recall.fraction == 1.0
-    assert recall.retained == (120666,)
-    assert recall.missing == ()
-    assert recall.site_only == (120664, 120667)
+    result = analyze_sites(poses=poses, settings=settings)
+    tiers = {candidate.evidence_tier for candidate in result.candidate_sites}
 
-
-def test_selection_seed_recall_reports_missing_sampling_seeds() -> None:
-    recall = selection_seed_recall(
-        sampling_seeds=(120666, 120670),
-        selection_site_seeds=(120664, 120666),
-    )
-
-    assert recall.fraction == 0.5
-    assert recall.retained == (120666,)
-    assert recall.missing == (120670,)
-    assert recall.site_only == (120664,)
-
-
-def test_selection_seed_recall_does_not_invent_success_without_sampling_hits() -> None:
-    recall = selection_seed_recall(
-        sampling_seeds=(),
-        selection_site_seeds=(120664,),
-    )
-
-    assert recall.fraction == 0.0
-    assert recall.retained == ()
-    assert recall.missing == ()
-    assert recall.site_only == (120664,)
+    assert tiers == {"conformation_specific", "insufficient_evidence"}
+    assert sum(candidate.handoff_eligible for candidate in result.candidate_sites) == 1

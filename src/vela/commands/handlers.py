@@ -14,6 +14,7 @@ from vela.commands.stages import (
     design_status,
     design_tool_check,
     discovery_analyze,
+    discovery_exploration_plan,
     discovery_plan,
     discovery_qualification_analyze,
     discovery_qualification_plan,
@@ -26,10 +27,17 @@ from vela.commands.stages import (
     preparation_run,
     preparation_status,
     validation_candidate_review,
+    validation_confirmation_handoff_plan,
     validation_control_analyze,
     validation_control_plan,
     validation_control_run,
     validation_environment_map,
+    validation_exploration_handoff_plan,
+    validation_funnel_confirmation_analyze,
+    validation_funnel_confirmation_plan,
+    validation_funnel_deep_analyze,
+    validation_funnel_deep_plan,
+    validation_funnel_handoff_plan,
     validation_guided_plan,
     validation_guided_run,
     validation_handoff_plan,
@@ -144,15 +152,17 @@ def _config_check(config: AppConfig) -> int:
         "Discovery qualification: "
         f"seeds={len(qualification.seeds)}, "
         f"control={qualification.control_bound_state_id}, "
-        f"native_LRMSD_A={qualification.max_native_ligand_rmsd_A:g}, "
+        "receptors="
+        f"{','.join(qualification.control_receptor_ids)}, "
+        f"benchmark={qualification.benchmark_receptor_id}, "
+        f"diagnostic_LRMSD_A={qualification.max_native_ligand_rmsd_A:g}, "
         "native_site_centroid_A="
         f"{qualification.max_native_site_centroid_distance_A:g}, "
-        "sampling_seed_support="
-        f"{qualification.min_native_sampling_seed_support}, "
         "site_seed_support="
         f"{qualification.min_native_site_seed_support}, "
-        "selection_seed_recall="
-        f"{qualification.min_selection_native_seed_recall_fraction:g}"
+        "receptor_site_diagnostic_budget="
+        f"{qualification.receptor_site_diagnostic_budget}, "
+        f"receptor_support={qualification.min_native_receptor_support}"
     )
     topology = qualification.topology_calibration
     print(
@@ -180,7 +190,12 @@ def _config_check(config: AppConfig) -> int:
             f"{analysis.contact_jaccard_distance}, "
             f"position_distance_A={analysis.position_distance_A}, "
             f"min_seed_support={analysis.min_seed_support}, "
-            f"min_receptor_support={analysis.min_receptor_support}"
+            f"min_receptor_support={analysis.min_receptor_support}, "
+            "min_conformation_specific_seed_support="
+            f"{analysis.min_conformation_specific_seed_support}, "
+            f"ensemble_candidate_budget={analysis.ensemble_candidate_budget}, "
+            "conformation_specific_candidate_budget="
+            f"{analysis.conformation_specific_candidate_budget}"
         )
     print(f"Registered structures: {len(config.receptors)}")
     print(f"Stage 2 apo/apo-like blind discovery: {len(apo_blind)}")
@@ -229,7 +244,23 @@ def _config_check(config: AppConfig) -> int:
         "random_translation_A="
         f"{config.validation.refinement.random_translation_A:g}, "
         "random_rotation_degrees="
-        f"{config.validation.refinement.random_rotation_degrees:g}"
+        f"{config.validation.refinement.random_rotation_degrees:g}, "
+        "receptor_backbone_contact_A="
+        f"{config.validation.refinement.receptor_backbone_contact_A:g}, "
+        "receptor_backbone_sequence_padding="
+        f"{config.validation.refinement.receptor_backbone_sequence_padding}"
+    )
+    funnel = config.validation.funnel
+    print(
+        "Stage 3 refinement funnel: "
+        "candidate_budget="
+        f"{funnel.ensemble_screening_budget}+{funnel.conformation_specific_screening_budget}, "
+        "promotion_budget="
+        f"{funnel.screening_promotion_budget}->{funnel.confirmation_promotion_budget}->"
+        f"{funnel.final_hypothesis_budget}, "
+        "seed_batches="
+        f"{','.join(map(str, config.validation.refinement.seed_batch_sizes))}, "
+        f"screening_starts_per_site={funnel.screening_starts_per_receptor_site}"
     )
     print(
         "Stage 4 sequence space: "
@@ -342,9 +373,15 @@ def execute(
     replication_run: Path | None = None,
     refinement_source: Path | None = None,
     topology_source: Path | None = None,
+    exploration_basis: Path | None = None,
     qualification_source: Path | None = None,
     site_budget: int | None = None,
     candidate_ids: tuple[str, ...] = (),
+    blind_candidate_ids: tuple[str, ...] = (),
+    functional_candidate_ids: tuple[str, ...] = (),
+    negative_refinement_runs: tuple[Path, ...] = (),
+    start_ids: tuple[str, ...] = (),
+    receptor_backbone_mode: str | None = None,
     design_source: Path | None = None,
     target_cluster_ids: tuple[str, ...] = (),
     target_id: str | None = None,
@@ -367,7 +404,6 @@ def execute(
             config=config,
             run_id=run_id,
             target_id=target_id,
-            control_run=control_run,
         )
     if (group, command) == ("discovery", "qualification-run"):
         if run_dir is None:
@@ -399,6 +435,17 @@ def execute(
         if run_id is None or target_id is None:
             raise RuntimeError("discovery plan requires run_id and target")
         return discovery_plan(config=config, run_id=run_id, target_id=target_id)
+    if (group, command) == ("discovery", "exploration-plan"):
+        if run_id is None or target_id is None or exploration_basis is None:
+            raise RuntimeError(
+                "discovery exploration-plan requires run_id, target, and basis_run"
+            )
+        return discovery_exploration_plan(
+            config=config,
+            run_id=run_id,
+            target_id=target_id,
+            basis_run=exploration_basis,
+        )
     if (group, command) == ("discovery", "analyze"):
         if run_dir is None:
             raise RuntimeError("discovery analyze requires run_dir")
@@ -460,6 +507,48 @@ def execute(
             run_id=run_id,
             candidate_ids=candidate_ids,
         )
+    if (group, command) == ("validation", "exploration-handoff-plan"):
+        if (
+            run_id is None
+            or source_run is None
+            or not blind_candidate_ids
+            or not functional_candidate_ids
+        ):
+            raise RuntimeError(
+                "validation exploration-handoff-plan requires run_id, discovery_run, "
+                "blind_candidate_id, and functional_candidate_id"
+            )
+        return validation_exploration_handoff_plan(
+            config=config,
+            discovery_run=source_run,
+            run_id=run_id,
+            blind_candidate_ids=blind_candidate_ids,
+            functional_candidate_ids=functional_candidate_ids,
+        )
+    if (group, command) == ("validation", "confirmation-handoff-plan"):
+        if run_id is None or source_run is None or not candidate_ids:
+            raise RuntimeError(
+                "validation confirmation-handoff-plan requires run_id, "
+                "discovery_run, and candidate_id"
+            )
+        return validation_confirmation_handoff_plan(
+            config=config,
+            discovery_run=source_run,
+            run_id=run_id,
+            candidate_ids=candidate_ids,
+        )
+    if (group, command) == ("validation", "funnel-handoff-plan"):
+        if run_id is None or source_run is None or not negative_refinement_runs:
+            raise RuntimeError(
+                "validation funnel-handoff-plan requires run_id, discovery_run, "
+                "and negative_refinement_run"
+            )
+        return validation_funnel_handoff_plan(
+            config=config,
+            discovery_run=source_run,
+            negative_refinement_runs=negative_refinement_runs,
+            run_id=run_id,
+        )
     if (group, command) == ("validation", "handoff-run"):
         if run_dir is None:
             raise RuntimeError("validation handoff-run requires run_dir")
@@ -481,16 +570,24 @@ def execute(
             raise RuntimeError("validation qualification-handoff-run requires run_dir")
         return validation_qualification_handoff_run(config=config, run_dir=run_dir)
     if (group, command) == ("validation", "qualification-refinement-plan"):
-        if run_id is None or refinement_source is None or control_run is None:
+        if (
+            run_id is None
+            or refinement_source is None
+            or control_run is None
+            or not start_ids
+            or receptor_backbone_mode is None
+        ):
             raise RuntimeError(
                 "validation qualification-refinement-plan requires run_id, "
-                "source_run, and control_run"
+                "source_run, control_run, start_id, and receptor_backbone_mode"
             )
         return validation_qualification_refinement_plan(
             config=config,
             source_run=refinement_source,
             control_run=control_run,
             run_id=run_id,
+            start_ids=start_ids,
+            receptor_backbone_mode=receptor_backbone_mode,
         )
     if (group, command) == ("validation", "qualification-refinement-run"):
         if run_dir is None:
@@ -514,6 +611,42 @@ def execute(
         if run_dir is None:
             raise RuntimeError("validation guided-run requires run_dir")
         return validation_guided_run(config=config, run_dir=run_dir)
+    if (group, command) == ("validation", "funnel-confirmation-plan"):
+        if run_id is None or refinement_source is None:
+            raise RuntimeError(
+                "validation funnel-confirmation-plan requires run_id and source_run"
+            )
+        return validation_funnel_confirmation_plan(
+            config=config,
+            source_run=refinement_source,
+            run_id=run_id,
+        )
+    if (group, command) == ("validation", "funnel-confirmation-analyze"):
+        if run_dir is None:
+            raise RuntimeError(
+                "validation funnel-confirmation-analyze requires run_dir"
+            )
+        return validation_funnel_confirmation_analyze(
+            config=config,
+            run_dir=run_dir,
+        )
+    if (group, command) == ("validation", "funnel-deep-plan"):
+        if run_id is None or refinement_source is None:
+            raise RuntimeError(
+                "validation funnel-deep-plan requires run_id and source_run"
+            )
+        return validation_funnel_deep_plan(
+            config=config,
+            source_run=refinement_source,
+            run_id=run_id,
+        )
+    if (group, command) == ("validation", "funnel-deep-analyze"):
+        if run_dir is None:
+            raise RuntimeError("validation funnel-deep-analyze requires run_dir")
+        return validation_funnel_deep_analyze(
+            config=config,
+            run_dir=run_dir,
+        )
     if (group, command) == ("validation", "refinement-plan"):
         if run_id is None or refinement_source is None:
             raise RuntimeError(

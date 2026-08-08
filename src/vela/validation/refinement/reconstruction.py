@@ -868,6 +868,7 @@ def write_chemistry_production_refine_protocol(
     random_translation_A: float,
     random_rotation_degrees: float,
     lowres_preoptimize: bool,
+    min_receptor_backbone: bool,
 ) -> None:
     """生成保持完整化学身份的正式 FlexPepDock 局部精修协议。"""
     if random_translation_A < 0 or random_rotation_degrees < 0:
@@ -875,6 +876,7 @@ def write_chemistry_production_refine_protocol(
     attributes = (
         'pep_refine="true" recal_foldtree="true" '
         f'lowres_preoptimize="{str(lowres_preoptimize).lower()}" '
+        f'min_receptor_bb="{str(min_receptor_backbone).lower()}" '
         f'rb_trans_size="{random_translation_A}" '
         f'rb_rot_size="{random_rotation_degrees}"'
     )

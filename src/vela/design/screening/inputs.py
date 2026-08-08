@@ -10,7 +10,11 @@ from vela.core.provenance import sha256_file
 from vela.core.typed_data import object_list, object_mapping
 from vela.design.models import DesignError, DesignTemplate
 from vela.validation.records import read_document, safe_identifier, validate_record
-from vela.validation.refinement.planning import BLIND_REFINEMENT_EVIDENCE
+from vela.validation.refinement.handoff_plan import MAIN_HANDOFF_EVIDENCE
+from vela.validation.refinement.planning import (
+    BLIND_REFINEMENT_EVIDENCE,
+    REFINEMENT_PLAN_SCHEMA,
+)
 from vela.validation.refinement.reconstruction import validate_flexpepdock_input
 
 
@@ -33,12 +37,14 @@ def _source_identity(
     plan_path = run_dir / "refinement_plan.json"
     plan = read_document(plan_path, name="design source refinement plan")
     if (
-        plan.get("schema") != "vela.validation-refinement-plan/2"
+        plan.get("schema") != REFINEMENT_PLAN_SCHEMA
         or plan.get("stage") != "validation_local_refinement"
         or plan.get("status") != "planned"
         or plan.get("chemistry_id") != config.chemistry.chemistry_id
         or plan.get("evidence_category") != BLIND_REFINEMENT_EVIDENCE
         or plan.get("known_site_information_used") is not False
+        or plan.get("source_evidence_category") != MAIN_HANDOFF_EVIDENCE
+        or plan.get("production_qualified") is not True
     ):
         raise DesignError("Stage 4 requires a blind Stage 3 refinement plan")
     try:
@@ -63,12 +69,14 @@ def _source_identity(
         run_dir / "refinement_manifest.json", name="design source refinement manifest"
     )
     if (
-        manifest.get("schema") != "vela.validation-refinement-manifest/2"
+        manifest.get("schema") != "vela.validation-refinement-manifest/3"
         or manifest.get("stage") != "validation_local_refinement"
         or manifest.get("status") != "completed"
         or manifest.get("chemistry_id") != config.chemistry.chemistry_id
         or manifest.get("evidence_category") != BLIND_REFINEMENT_EVIDENCE
         or manifest.get("known_site_information_used") is not False
+        or manifest.get("source_evidence_category") != MAIN_HANDOFF_EVIDENCE
+        or manifest.get("production_qualified") is not True
     ):
         raise DesignError("Stage 3 refinement manifest is not eligible for design")
     recorded_plan, recorded_hash = validate_record(
@@ -84,7 +92,7 @@ def _source_identity(
         review_root / "review_manifest.json", name="candidate review manifest"
     )
     if (
-        review.get("schema") != "vela.candidate-review-manifest/1"
+        review.get("schema") != "vela.candidate-review-manifest/2"
         or review.get("status") != "completed"
         or review.get("known_site_information_used_for_discovery") is not False
         or review.get("classification_applied") is not False
@@ -126,7 +134,7 @@ def selected_templates(
         analysis_root / "analysis_manifest.json", name="refinement analysis manifest"
     )
     if (
-        analysis.get("schema") != "vela.validation-refinement-analysis-manifest/1"
+        analysis.get("schema") != "vela.validation-refinement-analysis-manifest/3"
         or analysis.get("status") != "completed"
         or analysis.get("evidence_category") != BLIND_REFINEMENT_EVIDENCE
         or analysis.get("known_site_information_used") is not False

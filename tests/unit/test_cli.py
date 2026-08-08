@@ -3,8 +3,83 @@ from pathlib import Path
 import pytest
 
 from vela.cli import run
+from vela.commands.parser import build_parser
 
 PROJECT_CONFIG = Path(__file__).resolve().parents[2] / "configs"
+
+
+def test_exploration_plan_requires_explicit_basis_run() -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "discovery",
+                "exploration-plan",
+                "--run-id",
+                "p15-development",
+                "--target",
+                "ck2_alpha",
+            ]
+        )
+
+
+def test_exploration_handoff_requires_both_candidate_arms() -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "validation",
+                "exploration-handoff-plan",
+                "--discovery-run",
+                "discovery",
+                "--run-id",
+                "handoff",
+                "--blind-candidate-id",
+                "ALPHA_C001",
+            ]
+        )
+
+
+def test_qualification_refinement_plan_requires_explicit_start_id() -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "validation",
+                "qualification-refinement-plan",
+                "--source-run",
+                "source",
+                "--control-run",
+                "control",
+                "--run-id",
+                "diagnostic",
+                "--receptor-backbone-mode",
+                "fixed",
+            ]
+        )
+
+
+def test_qualification_refinement_plan_requires_receptor_backbone_mode() -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "validation",
+                "qualification-refinement-plan",
+                "--source-run",
+                "source",
+                "--control-run",
+                "control",
+                "--run-id",
+                "diagnostic",
+                "--start-id",
+                "selected_start",
+            ]
+        )
 
 
 def test_config_check_reports_all_planned_full_surface_receptors(
@@ -38,6 +113,9 @@ def test_config_check_reports_all_planned_full_surface_receptors(
     assert "1 guided; 2 environments" in output
     assert (
         "seeds_per_start=4, decoys_per_seed=128, total_decoys_per_start=512" in output
+    )
+    assert (
+        "receptor_backbone_contact_A=6, receptor_backbone_sequence_padding=2" in output
     )
     assert "Stage 4 sequence space: mutable_positions=9" in output
     assert "Stage 4 iterative neighborhood: max_parents=4" in output
@@ -105,6 +183,6 @@ def test_validation_status_separates_replication_and_refinement_gates(
     output = capsys.readouterr().out
     assert "Stage 3 independent setup ready: true" in output
     assert "Stage 3 bound-state blind replication ready: false" in output
-    assert "Stage 3 candidate refinement ready: false" in output
+    assert "Stage 3 candidate refinement ready: true" in output
     assert "global_method_not_qualified" in output
     assert "method_not_qualified" in output

@@ -22,7 +22,7 @@ chain_break_cutoff_A = 10.0
 max_ca_rmsd_A = 1.0
 
 [validation.handoff]
-# 每个受体 site 优先选择来自不同 seed 的非冗余起点。
+# 每个受体 site 在主要姿态簇间均衡选择中心与几何多样性起点。
 poses_per_receptor_site = 2
 chemistry_seed = 3101
 
@@ -32,6 +32,26 @@ prepack_seed = 3201
 random_translation_A = 0.0
 random_rotation_degrees = 0.0
 ranking_score = "reweighted_sc"
+# 受体柔性诊断只按起始复合物本身选择界面：6 Å 重原子壳层再沿序列扩展 2 个残基。
+receptor_backbone_contact_A = 6.0
+receptor_backbone_sequence_padding = 2
+# 三个批次依次对应screening、confirmation和deep confirmation；实际seed值只在[validation].seeds声明一次。
+seed_batch_sizes = [1, 1, 2]
+
+[validation.funnel]
+# Stage 3A-0最多交付10个双构象共识候选和2个构象特异候选。
+ensemble_screening_budget = 10
+conformation_specific_screening_budget = 2
+screening_promotion_budget = 6
+confirmation_promotion_budget = 3
+final_hypothesis_budget = 2
+screening_starts_per_receptor_site = 2
+source_pool_per_receptor_site = 4
+# Stage 3B的两个source×两个Rosetta seed共4个任务单元中至少3个进入同一原子簇。
+confirmation_min_task_cells = 3
+# Route B先对齐共同受体Cα，再同时满足骨架和接触指纹门槛。
+cross_receptor_max_backbone_rmsd_A = 3.0
+cross_receptor_min_contact_jaccard = 0.4
 
 [validation.analysis]
 # 所有筛选值必须由当前项目声明的独立控制和技术先导校准后冻结。
@@ -44,3 +64,4 @@ max_cluster_backbone_rmsd_A = "unresolved"
 min_heavy_atom_distance_A = "unresolved"
 min_refinement_seed_support = "unresolved"
 min_refinement_start_support = "unresolved"
+min_refinement_source_seed_support = "unresolved"

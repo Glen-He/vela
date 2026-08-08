@@ -1,4 +1,4 @@
-"""阶段二资格候选到阶段三的 native-aware 开发恢复诊断。"""
+"""不同受体构象之间的 native-aware cross-docking 开发诊断。"""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 from vela.config import AppConfig
 from vela.core.errors import VelaError
 from vela.core.provenance import (
+    JsonValue,
     atomic_write_json,
     atomic_write_text,
     is_current_vela_software,
@@ -31,6 +32,12 @@ from vela.validation.records import (
     safe_identifier,
     validate_record,
 )
+from vela.validation.refinement.receptor_flexibility import (
+    ReceptorBackboneMode,
+    resolve_receptor_backbone_mode,
+    select_local_receptor_backbone,
+    write_local_receptor_movemap,
+)
 from vela.validation.refinement.reconstruction import (
     validate_flexpepdock_input,
     write_chemistry_prepack_protocol,
@@ -52,10 +59,11 @@ from vela.validation.scores import (
 
 PLAN_NAME = "qualification_refinement_plan.json"
 MANIFEST_NAME = "qualification_refinement_manifest.json"
-PLAN_SCHEMA = "vela.validation-qualification-refinement-plan/2"
-MANIFEST_SCHEMA = "vela.validation-qualification-refinement-manifest/1"
-TASK_SCHEMA = "vela.validation-qualification-refinement-task-result/1"
-PREPACK_SCHEMA = "vela.validation-qualification-refinement-prepack-result/1"
+PLAN_SCHEMA = "vela.validation-qualification-refinement-plan/4"
+MANIFEST_SCHEMA = "vela.validation-qualification-refinement-manifest/3"
+TASK_SCHEMA = "vela.validation-qualification-refinement-task-result/2"
+PREPACK_SCHEMA = "vela.validation-qualification-refinement-prepack-result/2"
+EVIDENCE_CATEGORY = "cross_receptor_pose_robustness_diagnostic"
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +79,8 @@ class DiagnosticStart:
     input_sha256: str
     receptor_residue_count: int
     fixed_histidine_pose_indices: tuple[int, ...]
+    direct_contact_receptor_pose_indices: tuple[int, ...]
+    flexible_receptor_pose_indices: tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +106,15 @@ class DiagnosticOutcome:
 
     manifest_path: Path
     task_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedDiagnosticStart:
+    """预打包输入、二硫键和可选局部受体 MoveMap。"""
+
+    prepacked_path: Path
+    disulfide_path: Path
+    movemap_path: Path | None
 
 
 def _control_definition(
@@ -241,7 +260,7 @@ def _validated_sources(
     )
     if (
         handoff_manifest.get("schema")
-        != "vela.validation-qualification-handoff-manifest/4"
+        != "vela.validation-qualification-handoff-manifest/5"
         or handoff_manifest.get("status") != "completed"
         or handoff_manifest.get("development_only") is not True
         or handoff_manifest.get("formal_qualification_gate") is not False
@@ -368,26 +387,44 @@ def _starts(
     handoff_manifest: dict[str, object],
     native_sites: tuple[str, ...],
     chemistry: ChemistryDefinition,
+    requested_start_ids: tuple[str, ...],
+    receptor_backbone_mode: ReceptorBackboneMode,
 ) -> tuple[DiagnosticStart, ...]:
+    requested_start_ids = tuple(
+        safe_identifier(value, name="diagnostic start ID")
+        for value in requested_start_ids
+    )
+    if not requested_start_ids or len(requested_start_ids) != len(
+        set(requested_start_ids)
+    ):
+        raise ValidationError("diagnostic start IDs must be non-empty and unique")
     try:
         rows = object_list(handoff_manifest.get("tasks"), name="handoff tasks")
     except TypeError as exc:
         raise ValidationError("qualification handoff tasks are invalid") from exc
-    selected: list[DiagnosticStart] = []
+    requested = frozenset(requested_start_ids)
+    selected: dict[str, DiagnosticStart] = {}
     for raw in rows:
         try:
             row = object_mapping(raw, name="handoff task")
         except TypeError as exc:
             raise ValidationError("qualification handoff task is invalid") from exc
+        task_id = row.get("task_id")
+        if task_id not in requested:
+            continue
+        start_id = safe_identifier(task_id, name="diagnostic start ID")
         site_id = row.get("receptor_site_id")
         if site_id not in native_sites:
-            continue
+            raise ValidationError(
+                f"diagnostic start is outside the frozen native sites: {start_id}"
+            )
         if (
             row.get("execution_status") != "completed"
             or row.get("reconstruction_status") != "passed"
         ):
-            raise ValidationError("selected qualification handoff task did not pass")
-        start_id = safe_identifier(row.get("task_id"), name="diagnostic start ID")
+            raise ValidationError(
+                f"selected qualification handoff task did not pass: {start_id}"
+            )
         input_path, input_hash = validate_record(
             root=handoff_run_dir,
             raw=row.get("flexpepdock_input"),
@@ -399,33 +436,60 @@ def _starts(
             min_disulfide_sg_A=config.validation.min_disulfide_sg_A,
             max_disulfide_sg_A=config.validation.max_disulfide_sg_A,
         )
+        if receptor_backbone_mode == "local_constrained":
+            backbone_selection = select_local_receptor_backbone(
+                path=input_path,
+                contact_A=(config.validation.refinement.receptor_backbone_contact_A),
+                sequence_padding=(
+                    config.validation.refinement.receptor_backbone_sequence_padding
+                ),
+            )
+            direct_contacts = backbone_selection.direct_contact_pose_indices
+            flexible_receptor = backbone_selection.flexible_pose_indices
+        else:
+            direct_contacts = ()
+            flexible_receptor = ()
         seed = row.get("source_seed")
         if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
             raise ValidationError("diagnostic source seed is invalid")
-        selected.append(
-            DiagnosticStart(
-                start_id=start_id,
-                receptor_site_id=safe_identifier(site_id, name="receptor site ID"),
-                receptor_id=safe_identifier(row.get("receptor_id"), name="receptor ID"),
-                target=safe_identifier(row.get("target"), name="target ID"),
-                source_seed=seed,
-                input_path=input_path,
-                input_sha256=input_hash,
-                receptor_residue_count=receptor_count,
-                fixed_histidine_pose_indices=histidines,
-            )
+        selected[start_id] = DiagnosticStart(
+            start_id=start_id,
+            receptor_site_id=safe_identifier(site_id, name="receptor site ID"),
+            receptor_id=safe_identifier(row.get("receptor_id"), name="receptor ID"),
+            target=safe_identifier(row.get("target"), name="target ID"),
+            source_seed=seed,
+            input_path=input_path,
+            input_sha256=input_hash,
+            receptor_residue_count=receptor_count,
+            fixed_histidine_pose_indices=histidines,
+            direct_contact_receptor_pose_indices=direct_contacts,
+            flexible_receptor_pose_indices=flexible_receptor,
         )
-    counts = {site_id: 0 for site_id in native_sites}
-    for start in selected:
-        counts[start.receptor_site_id] += 1
-    if any(count != 2 for count in counts.values()):
-        raise ValidationError(
-            "each native-recovered site must contribute two frozen starts"
-        )
-    return tuple(selected)
+    missing = tuple(value for value in requested_start_ids if value not in selected)
+    if missing:
+        raise ValidationError("unknown diagnostic start IDs: " + ", ".join(missing))
+    return tuple(selected[value] for value in requested_start_ids)
 
 
-def _tasks(
+def _backbone_selection_records(
+    starts: tuple[DiagnosticStart, ...],
+) -> list[dict[str, JsonValue]]:
+    """冻结每个起点独立、且不读取 native 的局部受体自由度。"""
+    return [
+        {
+            "start_id": start.start_id,
+            "direct_contact_receptor_pose_indices": list(
+                start.direct_contact_receptor_pose_indices
+            ),
+            "flexible_receptor_pose_indices": list(
+                start.flexible_receptor_pose_indices
+            ),
+        }
+        for start in starts
+    ]
+
+
+def build_diagnostic_tasks(
     starts: tuple[DiagnosticStart, ...], seeds: tuple[int, ...]
 ) -> tuple[DiagnosticTask, ...]:
     tasks: list[DiagnosticTask] = []
@@ -438,9 +502,27 @@ def _tasks(
                     refinement_seed=seed,
                 )
             )
-    if len(seeds) != 4 or len(tasks) != 16:
-        raise ValidationError("qualification diagnostic requires 4 starts and 4 seeds")
+    if not starts or not seeds:
+        raise ValidationError("qualification diagnostic requires starts and seeds")
     return tuple(tasks)
+
+
+def _task_records(tasks: tuple[DiagnosticTask, ...]) -> list[dict[str, JsonValue]]:
+    """生成计划写入和执行复核共用的诊断任务合同。"""
+    return [
+        {
+            "task_id": task.task_id,
+            "start_id": task.start.start_id,
+            "receptor_site_id": task.start.receptor_site_id,
+            "receptor_id": task.start.receptor_id,
+            "target": task.start.target,
+            "source_seed": task.start.source_seed,
+            "refinement_seed": task.refinement_seed,
+            "input_sha256": task.start.input_sha256,
+            "status": "planned",
+        }
+        for task in tasks
+    ]
 
 
 def write_qualification_refinement_plan(
@@ -449,12 +531,15 @@ def write_qualification_refinement_plan(
     handoff_run_dir: Path,
     control_run_dir: Path,
     run_id: str,
+    start_ids: tuple[str, ...],
+    receptor_backbone_mode: str,
 ) -> DiagnosticPlan:
     """冻结只用于定位阶段二/三边界瓶颈的 native-aware 诊断。"""
     try:
         validate_run_id(run_id)
     except VelaError as exc:
         raise ValidationError(str(exc)) from exc
+    resolved_backbone_mode = resolve_receptor_backbone_mode(receptor_backbone_mode)
     (
         handoff_manifest,
         _,
@@ -474,8 +559,10 @@ def write_qualification_refinement_plan(
         handoff_manifest=handoff_manifest,
         native_sites=native_sites,
         chemistry=chemistry,
+        requested_start_ids=start_ids,
+        receptor_backbone_mode=resolved_backbone_mode,
     )
-    tasks = _tasks(starts, config.validation.seeds)
+    tasks = build_diagnostic_tasks(starts, config.validation.seeds)
     tool = verify_rosetta_scripts_tool(config.validation.rosetta)
     control, _ = _control_definition(config)
     run_dir = (
@@ -498,7 +585,12 @@ def write_qualification_refinement_plan(
             "development_only": True,
             "formal_qualification_gate": False,
             "native_information_used_for_task_selection": True,
-            "evidence_category": "native_aware_qualification_refinement_diagnostic",
+            "evidence_category": EVIDENCE_CATEGORY,
+            "receptor_relation": {
+                "kind": "cross_receptor_cross_docking",
+                "source_receptor_ids": sorted({start.receptor_id for start in starts}),
+                "native_bound_state_id": control.bound_state_id,
+            },
             "method_id": config.validation.method_id,
             "chemistry": chemistry_identity_record(chemistry),
             "software": {
@@ -530,10 +622,12 @@ def write_qualification_refinement_plan(
             },
             "selection": {
                 "selected_native_site_ids": list(native_sites),
-                "starts_per_site": 2,
+                "requested_start_ids": list(start_ids),
+                "selected_start_count": len(starts),
                 "source_start_selection_was_native_free": True,
                 "diagnostic_subset_selection_used_native_information": True,
                 "source_holdout_status": "unqualified",
+                "receptor_backbone_selections": _backbone_selection_records(starts),
             },
             "source_handoff_qc": _handoff_qc_record(handoff_manifest),
             "parameters": {
@@ -546,22 +640,29 @@ def write_qualification_refinement_plan(
                 "max_native_backbone_rmsd_A": control.max_recovery_rmsd_A,
                 "max_cluster_backbone_rmsd_A": control.max_cluster_backbone_rmsd_A,
                 "min_refinement_seed_support": 2,
-                "min_source_start_support": 2,
+                "min_source_start_support": min(2, len(starts)),
+                "receptor_backbone": {
+                    "mode": resolved_backbone_mode,
+                    "selection": (
+                        "start_pose_heavy_atom_contact_shell_with_sequence_padding"
+                    ),
+                    "contact_A": (
+                        config.validation.refinement.receptor_backbone_contact_A
+                    ),
+                    "sequence_padding": (
+                        config.validation.refinement.receptor_backbone_sequence_padding
+                    ),
+                    "movemap_policy": (
+                        "all_receptor_chi; selected_receptor_bb_chi; "
+                        "all_peptide_bb_chi; docking_jump_only"
+                    ),
+                    "coordinate_constraint": (
+                        "FlexPepDock min_receptor_bb receptor-CA harmonic; "
+                        "mean=0_A; sd=1_A"
+                    ),
+                },
             },
-            "tasks": [
-                {
-                    "task_id": task.task_id,
-                    "start_id": task.start.start_id,
-                    "receptor_site_id": task.start.receptor_site_id,
-                    "receptor_id": task.start.receptor_id,
-                    "target": task.start.target,
-                    "source_seed": task.start.source_seed,
-                    "refinement_seed": task.refinement_seed,
-                    "input_sha256": task.start.input_sha256,
-                    "status": "planned",
-                }
-                for task in tasks
-            ],
+            "tasks": _task_records(tasks),
         },
     )
     return DiagnosticPlan(run_dir, tasks)
@@ -584,8 +685,25 @@ def _verify_plan(
         raise ValidationError("qualification refinement plan identity is invalid")
     try:
         inputs = object_mapping(plan.get("inputs"), name="diagnostic inputs")
+        parameters = object_mapping(
+            plan.get("parameters"), name="diagnostic parameters"
+        )
+        backbone = object_mapping(
+            parameters.get("receptor_backbone"),
+            name="diagnostic receptor backbone protocol",
+        )
     except TypeError as exc:
-        raise ValidationError("qualification refinement inputs are invalid") from exc
+        raise ValidationError("qualification refinement plan is invalid") from exc
+    receptor_backbone_mode = resolve_receptor_backbone_mode(backbone.get("mode"))
+    if (
+        backbone.get("contact_A")
+        != config.validation.refinement.receptor_backbone_contact_A
+        or backbone.get("sequence_padding")
+        != config.validation.refinement.receptor_backbone_sequence_padding
+    ):
+        raise ValidationError(
+            "diagnostic receptor backbone parameters differ from current config"
+        )
     snapshot, _ = validate_record(
         root=run_dir, raw=inputs.get("config_snapshot"), name="config snapshot"
     )
@@ -653,32 +771,40 @@ def _verify_plan(
         raise ValidationError("diagnostic chemistry differs from the frozen plan")
     if plan.get("source_handoff_qc") != _handoff_qc_record(source_manifest):
         raise ValidationError("source handoff QC differs from the frozen plan")
+    try:
+        selection = object_mapping(plan.get("selection"), name="diagnostic selection")
+        requested_rows = object_list(
+            selection.get("requested_start_ids"), name="diagnostic start IDs"
+        )
+    except TypeError as exc:
+        raise ValidationError("diagnostic selection is invalid") from exc
+    if any(not isinstance(value, str) for value in requested_rows):
+        raise ValidationError("diagnostic start IDs are invalid")
+    requested_start_ids = tuple(
+        value for value in requested_rows if isinstance(value, str)
+    )
     starts = _starts(
         config=config,
         handoff_run_dir=handoff_manifest.parent,
         handoff_manifest=source_manifest,
         native_sites=native_sites,
         chemistry=chemistry,
+        requested_start_ids=requested_start_ids,
+        receptor_backbone_mode=receptor_backbone_mode,
     )
-    tasks = _tasks(starts, config.validation.seeds)
+    if selection.get("selected_start_count") != len(starts):
+        raise ValidationError("diagnostic selected-start count changed")
+    if selection.get("receptor_backbone_selections") != _backbone_selection_records(
+        starts
+    ):
+        raise ValidationError("diagnostic receptor backbone selection changed")
+    tasks = build_diagnostic_tasks(starts, config.validation.seeds)
     try:
         rows = object_list(plan.get("tasks"), name="diagnostic tasks")
     except TypeError as exc:
         raise ValidationError("diagnostic tasks are invalid") from exc
-    recorded = tuple(
-        (
-            object_mapping(raw, name="diagnostic task").get("task_id"),
-            object_mapping(raw, name="diagnostic task").get("start_id"),
-            object_mapping(raw, name="diagnostic task").get("refinement_seed"),
-            object_mapping(raw, name="diagnostic task").get("status"),
-        )
-        for raw in rows
-    )
-    expected = tuple(
-        (task.task_id, task.start.start_id, task.refinement_seed, "planned")
-        for task in tasks
-    )
-    if recorded != expected:
+    recorded = [object_mapping(raw, name="diagnostic task") for raw in rows]
+    if recorded != _task_records(tasks):
         raise ValidationError("diagnostic tasks differ from the frozen plan")
     tool = verify_rosetta_scripts_tool(config.validation.rosetta)
     try:
@@ -700,8 +826,18 @@ def _prepare_start(
     start: DiagnosticStart,
     run_dir: Path,
     plan_hash: str,
-) -> tuple[Path, Path]:
+) -> PreparedDiagnosticStart:
     start_dir = run_dir / "starts" / start.start_id
+    local_backbone = bool(start.flexible_receptor_pose_indices)
+    records = {
+        "output": "prepack output",
+        "fix_disulfide": "prepack disulfide",
+        "protocol": "prepack protocol",
+        "scorefile": "prepack scorefile",
+        "log": "prepack log",
+    }
+    if local_backbone:
+        records["movemap"] = "local receptor MoveMap"
     resumed = resume_completed_result(
         directory=start_dir,
         filename="prepack_result.json",
@@ -710,17 +846,15 @@ def _prepare_start(
         identity={"start_id": start.start_id},
         plan_hash_key="diagnostic_plan_sha256",
         plan_hash=plan_hash,
-        records={
-            "output": "prepack output",
-            "fix_disulfide": "prepack disulfide",
-            "protocol": "prepack protocol",
-            "scorefile": "prepack scorefile",
-            "log": "prepack log",
-        },
+        records=records,
         stale_label="diagnostic prepack",
     )
     if resumed is not None:
-        return resumed.files["output"], resumed.files["fix_disulfide"]
+        return PreparedDiagnosticStart(
+            resumed.files["output"],
+            resumed.files["fix_disulfide"],
+            resumed.files.get("movemap"),
+        )
     if start_dir.exists():
         raise ValidationError(
             f"incomplete diagnostic prepack requires review: {start_dir}"
@@ -728,6 +862,7 @@ def _prepare_start(
     start_dir.mkdir(parents=True)
     disulfide = start_dir / "fix_disulfide.txt"
     protocol = start_dir / "prepack.xml"
+    movemap = start_dir / "local_receptor.movemap" if local_backbone else None
     write_disulfide_indices(
         destination=disulfide,
         receptor_residue_count=start.receptor_residue_count,
@@ -739,6 +874,13 @@ def _prepare_start(
         chemistry=chemistry,
         score_function=config.validation.rosetta.score_function,
     )
+    if movemap is not None:
+        write_local_receptor_movemap(
+            destination=movemap,
+            receptor_residue_count=start.receptor_residue_count,
+            peptide_residue_count=len(chemistry.sequence),
+            flexible_receptor_pose_indices=(start.flexible_receptor_pose_indices),
+        )
     command = build_chemistry_flexpepdock_command(
         settings=config.validation.rosetta,
         input_path=start.input_path,
@@ -750,6 +892,7 @@ def _prepare_start(
         nstruct=1,
         scorefile_name="prepack.sc",
         native_path=None,
+        movemap_path=None,
     )
     log = start_dir / "prepack.log"
     run_rosetta_command(
@@ -767,22 +910,25 @@ def _prepare_start(
         min_disulfide_sg_A=config.validation.min_disulfide_sg_A,
         max_disulfide_sg_A=config.validation.max_disulfide_sg_A,
     )
+    result: dict[str, JsonValue] = {
+        "schema": PREPACK_SCHEMA,
+        "status": "completed",
+        "start_id": start.start_id,
+        "diagnostic_plan_sha256": plan_hash,
+        "command": list(command),
+        "output": file_record(output, root=start_dir),
+        "fix_disulfide": file_record(disulfide, root=start_dir),
+        "protocol": file_record(protocol, root=start_dir),
+        "scorefile": file_record(scorefile, root=start_dir),
+        "log": file_record(log, root=start_dir),
+    }
+    if movemap is not None:
+        result["movemap"] = file_record(movemap, root=start_dir)
     atomic_write_json(
         start_dir / "prepack_result.json",
-        {
-            "schema": PREPACK_SCHEMA,
-            "status": "completed",
-            "start_id": start.start_id,
-            "diagnostic_plan_sha256": plan_hash,
-            "command": list(command),
-            "output": file_record(output, root=start_dir),
-            "fix_disulfide": file_record(disulfide, root=start_dir),
-            "protocol": file_record(protocol, root=start_dir),
-            "scorefile": file_record(scorefile, root=start_dir),
-            "log": file_record(log, root=start_dir),
-        },
+        result,
     )
-    return output, disulfide
+    return PreparedDiagnosticStart(output, disulfide, movemap)
 
 
 def _run_task(
@@ -791,7 +937,7 @@ def _run_task(
     chemistry: ChemistryDefinition,
     native_reference: Path,
     task: DiagnosticTask,
-    prepared: tuple[Path, Path],
+    prepared: PreparedDiagnosticStart,
     run_dir: Path,
     plan_hash: str,
 ) -> Path:
@@ -826,19 +972,20 @@ def _run_task(
         random_translation_A=config.validation.refinement.random_translation_A,
         random_rotation_degrees=config.validation.refinement.random_rotation_degrees,
         lowres_preoptimize=config.validation.rosetta.lowres_preoptimize,
+        min_receptor_backbone=prepared.movemap_path is not None,
     )
-    prepacked, disulfide = prepared
     command = build_chemistry_flexpepdock_command(
         settings=config.validation.rosetta,
-        input_path=prepacked,
+        input_path=prepared.prepacked_path,
         protocol_path=protocol,
-        disulfide_path=disulfide,
+        disulfide_path=prepared.disulfide_path,
         output_dir=task_dir,
         seed=task.refinement_seed,
         fixed_histidine_pose_indices=task.start.fixed_histidine_pose_indices,
         nstruct=config.validation.rosetta.decoys_per_seed,
         scorefile_name="refine.sc",
         native_path=native_reference,
+        movemap_path=prepared.movemap_path,
     )
     log = task_dir / "refine.log"
     started_at = utc_now()
@@ -883,6 +1030,9 @@ def _run_task(
             "receptor_site_id": task.start.receptor_site_id,
             "source_seed": task.start.source_seed,
             "refinement_seed": task.refinement_seed,
+            "receptor_backbone_mode": (
+                "local_constrained" if prepared.movemap_path is not None else "fixed"
+            ),
             "diagnostic_plan_sha256": plan_hash,
             "started_at": started_at,
             "completed_at": utc_now(),
@@ -905,11 +1055,26 @@ def _run_task(
 def run_qualification_refinement(
     *, config: AppConfig, run_dir: Path
 ) -> DiagnosticOutcome:
-    """执行冻结的 4x4 开发诊断; 不将结果晋升为方法资格。"""
+    """执行冻结的显式起点开发诊断; 不将结果晋升为方法资格。"""
     manifest_path = run_dir / MANIFEST_NAME
     if manifest_path.exists():
         raise ValidationError(f"diagnostic manifest already exists: {manifest_path}")
-    _, tasks, chemistry, native_reference = _verify_plan(config=config, run_dir=run_dir)
+    plan, tasks, chemistry, native_reference = _verify_plan(
+        config=config, run_dir=run_dir
+    )
+    try:
+        parameters = object_mapping(
+            plan.get("parameters"), name="diagnostic parameters"
+        )
+        backbone = object_mapping(
+            parameters.get("receptor_backbone"),
+            name="diagnostic receptor backbone protocol",
+        )
+    except TypeError as exc:
+        raise ValidationError(
+            "diagnostic receptor backbone protocol is invalid"
+        ) from exc
+    receptor_backbone_mode = resolve_receptor_backbone_mode(backbone.get("mode"))
     plan_path = run_dir / PLAN_NAME
     plan_hash = sha256_file(plan_path)
     starts = {task.start.start_id: task.start for task in tasks}
@@ -949,8 +1114,9 @@ def run_qualification_refinement(
             "development_only": True,
             "formal_qualification_gate": False,
             "native_information_used_for_task_selection": True,
-            "evidence_category": "native_aware_qualification_refinement_diagnostic",
+            "evidence_category": EVIDENCE_CATEGORY,
             "method_id": config.validation.method_id,
+            "receptor_backbone_mode": receptor_backbone_mode,
             "chemistry": chemistry_identity_record(chemistry),
             "qualification_refinement_plan": file_record(plan_path, root=run_dir),
             "task_count": len(tasks),

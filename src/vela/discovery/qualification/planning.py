@@ -12,7 +12,6 @@ from vela.core.provenance import (
     JsonValue,
     atomic_write_json,
     atomic_write_text,
-    is_current_vela_software,
     is_vela_software_identity,
     sha256_file,
     utc_now,
@@ -20,18 +19,15 @@ from vela.core.provenance import (
 )
 from vela.core.run_identity import validate_run_id
 from vela.core.typed_data import object_mapping
+from vela.discovery.analysis.clustering import candidate_analysis_contract
 from vela.discovery.models import DiscoveryError, DiscoveryTask
 from vela.discovery.qualification.control import control_bound_state, control_chemistry
-from vela.discovery.qualification.schemas import (
-    PLAN_SCHEMA,
-    REPORT_SCHEMA,
-)
+from vela.discovery.qualification.schemas import PLAN_SCHEMA
 from vela.discovery.sampling.evidence import candidate_selection_contract
 from vela.discovery.sampling.planning import cabsdock_parameters
 from vela.preparation.chemistry import ChemistryDefinition
 
-CONTROL_RECOVERY = "known_complex_recovery"
-TARGET_PILOT = "target_apo_pilot"
+CONTROL_RECOVERY = "known_site_discovery"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,24 +61,17 @@ def _method_identity(config: AppConfig) -> tuple[str, str]:
 
 
 def build_qualification_cases(
-    *, config: AppConfig, target_id: str, include_control: bool = True
+    *, config: AppConfig, target_id: str
 ) -> tuple[QualificationCase, ...]:
-    """按资格 seed 展开实验回收控制和当前靶标 apo 技术先导。"""
+    """按 seed 展开正式受体构象上的已知位点盲搜索控制。"""
     method_id, adapter_id = _method_identity(config)
+    rules = config.discovery.qualification
+    if target_id != rules.control_target_id:
+        raise DiscoveryError(
+            "qualification requires a target-matched known-site control"
+        )
     target = config.discovery.target(target_id)
     receptor_by_id = {item.receptor_id: item for item in config.receptors}
-    pilot = receptor_by_id.get(target.pilot_receptor)
-    if (
-        pilot is None
-        or pilot.target != target_id
-        or "blind_discovery" not in pilot.roles
-    ):
-        raise DiscoveryError(
-            f"qualification pilot is not a blind-discovery receptor: {target.pilot_receptor}"
-        )
-    pilot_path = (
-        config.paths.data_dir / "receptors" / "prepared" / f"{pilot.receptor_id}.cif"
-    )
     reference_path = (
         config.paths.data_dir
         / "receptors"
@@ -93,27 +82,24 @@ def build_qualification_cases(
     control_root = (
         config.paths.data_dir / "validation" / "bound_states" / state.state_id
     )
-    control_receptor_definition = receptor_by_id.get(
-        config.discovery.qualification.control_receptor_id
-    )
-    if (
-        control_receptor_definition is None
-        or control_receptor_definition.target
-        != config.discovery.qualification.control_target_id
-        or "qualification_control" not in control_receptor_definition.roles
-    ):
-        raise DiscoveryError(
-            "qualification control receptor lacks its qualification_control role"
-        )
-    control_receptor = (
-        config.paths.data_dir
-        / "receptors"
-        / "prepared"
-        / f"{control_receptor_definition.receptor_id}.cif"
-    )
     native_pair = control_root / "pair_reference.cif"
-    required = (pilot_path, reference_path, control_receptor, native_pair)
-    missing = [path for path in required if not path.is_file()]
+    receptor_definitions = tuple(
+        receptor_by_id[receptor_id] for receptor_id in rules.control_receptor_ids
+    )
+    receptor_paths = {
+        definition.receptor_id: (
+            config.paths.data_dir
+            / "receptors"
+            / "prepared"
+            / f"{definition.receptor_id}.cif"
+        )
+        for definition in receptor_definitions
+    }
+    missing = [
+        path
+        for path in (reference_path, native_pair, *receptor_paths.values())
+        if not path.is_file()
+    ]
     if missing:
         raise DiscoveryError(
             "qualification input is missing: " + ", ".join(map(str, missing))
@@ -126,18 +112,19 @@ def build_qualification_cases(
         )
     cases: list[QualificationCase] = []
     for seed in config.discovery.qualification.seeds:
-        if include_control:
+        for receptor in receptor_definitions:
+            receptor_path = receptor_paths[receptor.receptor_id]
             cases.append(
                 QualificationCase(
                     task=DiscoveryTask(
                         task_id=(
                             f"control_{state.state_id}_on_"
-                            f"{control_receptor_definition.receptor_id}__seed_{seed}"
+                            f"{receptor.receptor_id}__seed_{seed}"
                         ),
-                        receptor_id=control_receptor_definition.receptor_id,
-                        target=config.discovery.qualification.control_target_id,
-                        receptor_path=control_receptor,
-                        receptor_sha256=sha256_file(control_receptor),
+                        receptor_id=receptor.receptor_id,
+                        target=target_id,
+                        receptor_path=receptor_path,
+                        receptor_sha256=sha256_file(receptor_path),
                         chemistry_id=control_definition.chemistry_id,
                         method_id=method_id,
                         adapter_id=adapter_id,
@@ -146,94 +133,12 @@ def build_qualification_cases(
                     ),
                     chemistry=control_definition,
                     secondary_structure=control_secondary,
-                    reference_receptor_id=control_receptor_definition.receptor_id,
-                    reference_path=control_receptor,
+                    reference_receptor_id=target.reference_receptor,
+                    reference_path=reference_path,
                     native_pair_path=native_pair,
                 )
             )
-        cases.append(
-            QualificationCase(
-                task=DiscoveryTask(
-                    task_id=f"pilot_{pilot.receptor_id}__seed_{seed}",
-                    receptor_id=pilot.receptor_id,
-                    target=target_id,
-                    receptor_path=pilot_path,
-                    receptor_sha256=sha256_file(pilot_path),
-                    chemistry_id=config.chemistry.chemistry_id,
-                    method_id=method_id,
-                    adapter_id=adapter_id,
-                    seed=seed,
-                    evidence_category=TARGET_PILOT,
-                ),
-                chemistry=config.chemistry,
-                secondary_structure=(
-                    config.discovery.cabsdock.peptide_secondary_structure
-                ),
-                reference_receptor_id=target.reference_receptor,
-                reference_path=reference_path,
-                native_pair_path=None,
-            )
-        )
     return tuple(cases)
-
-
-def _shared_control_record(
-    *, config: AppConfig, control_run: Path
-) -> dict[str, JsonValue]:
-    resolved = control_run.expanduser().resolve()
-    root = (config.paths.outputs_dir / "discovery" / "qualifications").resolve()
-    if not resolved.is_relative_to(root):
-        raise DiscoveryError(
-            f"shared control run is outside discovery qualifications: {resolved}"
-        )
-    relative = resolved.relative_to(root)
-    paths = {
-        "qualification_plan": resolved / "qualification_plan.json",
-        "qualification_sampling": resolved / "qualification_sampling.json",
-        "pose_evidence": resolved / "pose_evidence.tsv",
-        "baseline_pose_evidence": resolved / "baseline_pose_evidence.tsv",
-        "native_recovery": resolved / "native_recovery.tsv",
-        "qualification_report": resolved / "qualification_report.json",
-    }
-    missing = [path for path in paths.values() if not path.is_file()]
-    if missing:
-        raise DiscoveryError(
-            "shared control run is incomplete: " + ", ".join(map(str, missing))
-        )
-    try:
-        plan_value: object = json.loads(
-            paths["qualification_plan"].read_text(encoding="utf-8")
-        )
-        object_mapping(plan_value, name="shared qualification plan")
-        report_value: object = json.loads(
-            paths["qualification_report"].read_text(encoding="utf-8")
-        )
-        report = object_mapping(report_value, name="shared qualification report")
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
-        raise DiscoveryError("shared qualification report is invalid") from exc
-    control = object_mapping(
-        report.get("control_recovery"), name="shared control recovery"
-    )
-    selection = object_mapping(
-        control.get("candidate_selection"), name="shared candidate selection"
-    )
-    if (
-        report.get("schema") != REPORT_SCHEMA
-        or report.get("status") != "qualified"
-        or selection.get("passed") is not True
-        or not is_current_vela_software(report.get("analysis_software"))
-    ):
-        raise DiscoveryError("shared qualification control did not pass")
-    return {
-        "run_path": relative.as_posix(),
-        "files": {
-            name: {
-                "path": path.name,
-                "sha256": sha256_file(path),
-            }
-            for name, path in paths.items()
-        },
-    }
 
 
 def topology_calibration_record(config: AppConfig) -> dict[str, JsonValue]:
@@ -386,28 +291,26 @@ def qualification_decision_rules(
                 config.discovery.cabsdock.min_models_for_selection
             ),
         },
-        "max_native_ligand_rmsd_A": rules.max_native_ligand_rmsd_A,
-        "max_native_site_centroid_distance_A": (
-            rules.max_native_site_centroid_distance_A
-        ),
-        "min_native_receptor_contact_fraction": (
-            rules.min_native_receptor_contact_fraction
-        ),
-        "min_native_sampling_seed_support": rules.min_native_sampling_seed_support,
-        "min_native_site_seed_support": rules.min_native_site_seed_support,
-        "min_selection_native_seed_recall_fraction": (
-            rules.min_selection_native_seed_recall_fraction
-        ),
+        "site_discovery": {
+            "qualification_gate": True,
+            "max_native_site_centroid_distance_A": (
+                rules.max_native_site_centroid_distance_A
+            ),
+            "min_native_receptor_contact_fraction": (
+                rules.min_native_receptor_contact_fraction
+            ),
+            "min_native_site_seed_support": rules.min_native_site_seed_support,
+            "min_native_receptor_support": rules.min_native_receptor_support,
+            "receptor_site_diagnostic_budget": (rules.receptor_site_diagnostic_budget),
+        },
+        "exact_pose_recovery": {
+            "qualification_gate": False,
+            "max_native_ligand_rmsd_A": rules.max_native_ligand_rmsd_A,
+            "interpretation": "descriptive_capture_range_diagnostic",
+        },
         "site_analysis": {
             "parameter_selection": "frozen_before_validation_seeds",
-            "contact_jaccard_distance": target_analysis.contact_jaccard_distance,
-            "position_distance_A": target_analysis.position_distance_A,
-            "min_seed_support": target_analysis.min_seed_support,
-            "min_receptor_support": target_analysis.min_receptor_support,
-        },
-        "target_pilot": {
-            "purpose": "technical_execution_and_descriptive_site_evidence",
-            "qualification_gate": False,
+            "contract": candidate_analysis_contract(target_analysis),
         },
     }
 
@@ -462,7 +365,6 @@ def write_qualification_plan(
     config: AppConfig,
     run_id: str,
     target_id: str,
-    control_run: Path | None = None,
 ) -> QualificationPlan:
     """写出一个靶标的不可变资格计划。"""
     try:
@@ -472,16 +374,10 @@ def write_qualification_plan(
     run_dir = config.paths.outputs_dir / "discovery" / "qualifications" / run_id
     if run_dir.exists():
         raise DiscoveryError(f"qualification run directory already exists: {run_dir}")
-    shared_control = (
-        _shared_control_record(config=config, control_run=control_run)
-        if control_run is not None
-        else None
-    )
-    cases = build_qualification_cases(
-        config=config,
-        target_id=target_id,
-        include_control=shared_control is None,
-    )
+    cases = build_qualification_cases(config=config, target_id=target_id)
+    topology_calibration = topology_calibration_record(config)
+    decision_rules = qualification_decision_rules(config=config, target_id=target_id)
+    tasks = case_records(cases=cases, data_dir=config.paths.data_dir)
     snapshot_path = run_dir / "config.snapshot.txt"
     atomic_write_text(snapshot_path, config.source_snapshot_text)
     rules = config.discovery.qualification
@@ -496,28 +392,29 @@ def write_qualification_plan(
             "planned_at": utc_now(),
             "software": vela_software_identity(),
             "known_site_information_use": {
-                CONTROL_RECOVERY: "evaluation_only",
-                TARGET_PILOT: False,
+                CONTROL_RECOVERY: "evaluation_only_after_candidate_freeze",
             },
-            "shared_control": shared_control,
             "control_scope": {
                 "control_target_id": rules.control_target_id,
-                "control_receptor_id": rules.control_receptor_id,
+                "control_receptor_ids": list(rules.control_receptor_ids),
+                "benchmark_receptor_id": rules.benchmark_receptor_id,
+                "reference_receptor_id": (
+                    config.discovery.target(target_id).reference_receptor
+                ),
                 "native_bound_state_id": rules.control_bound_state_id,
                 "requested_target_id": target_id,
-                "target_matched": target_id == rules.control_target_id,
+                "protein_target_matched": True,
+                "receptor_relation": "cross_receptor_target_domain",
             },
-            "topology_calibration": topology_calibration_record(config),
+            "topology_calibration": topology_calibration,
             "config_snapshot": {
                 "path": snapshot_path.name,
                 "sha256": sha256_file(snapshot_path),
             },
             "method_parameters": {"cabsdock": cabsdock_parameters(config)},
-            "decision_rules": qualification_decision_rules(
-                config=config, target_id=target_id
-            ),
+            "decision_rules": decision_rules,
             "task_count": len(cases),
-            "tasks": case_records(cases=cases, data_dir=config.paths.data_dir),
+            "tasks": tasks,
         },
     )
     return QualificationPlan(run_id, target_id, run_dir, cases)

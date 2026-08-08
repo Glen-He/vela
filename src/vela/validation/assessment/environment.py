@@ -299,7 +299,7 @@ def _representatives(
     )
     evidence_category, known_site_information_used = refinement_identity(plan)
     if (
-        manifest.get("schema") != "vela.validation-refinement-analysis-manifest/1"
+        manifest.get("schema") != "vela.validation-refinement-analysis-manifest/3"
         or manifest.get("status") != "completed"
         or manifest.get("evidence_category") != evidence_category
         or manifest.get("known_site_information_used")

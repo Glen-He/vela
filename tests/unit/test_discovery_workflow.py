@@ -12,11 +12,15 @@ from vela.core.provenance import (
     sha256_file,
     vela_software_identity,
 )
+from vela.discovery.analysis.clustering import candidate_analysis_contract
 from vela.discovery.analysis.pose_table import POSE_FIELDS, read_pose_evidence
 from vela.discovery.analysis.workflow import analyze_discovery_run
-from vela.discovery.models import SiteAnalysisSettings
+from vela.discovery.models import DiscoveryError, SiteAnalysisSettings
 from vela.validation.models import ValidationError
-from vela.validation.refinement.handoff_plan import build_handoff_tasks
+from vela.validation.refinement.handoff_plan import (
+    build_handoff_tasks,
+    candidate_evidence_records,
+)
 
 PROJECT_CONFIG = Path(__file__).resolve().parents[2] / "configs"
 
@@ -111,7 +115,7 @@ def test_completed_normalized_run_produces_supported_candidate(tmp_path: Path) -
     evidence_rows: list[str] = []
     config = load_config(PROJECT_CONFIG)
     for receptor, offset in (("3Q04_A", 0.0), ("3QA0_A", 0.2)):
-        for seed in (11, 22):
+        for seed in (11, 22, 33, 44):
             task_id = f"{receptor}__seed_{seed}"
             pose_id = f"{task_id}__pose_001"
             model = models_dir / f"{pose_id}.pdb"
@@ -154,23 +158,33 @@ def test_completed_normalized_run_produces_supported_candidate(tmp_path: Path) -
             }
             evidence_rows.append("\t".join(values[field] for field in POSE_FIELDS))
     run_manifest = run_dir / "run_manifest.json"
+    settings = SiteAnalysisSettings(
+        contact_jaccard_distance=0.5,
+        position_distance_A=2.0,
+        min_seed_support=2,
+        min_receptor_support=2,
+        min_conformation_specific_seed_support=2,
+        ensemble_candidate_budget=8,
+        conformation_specific_candidate_budget=2,
+    )
     atomic_write_json(
         run_manifest,
         {
-            "schema": "vela.discovery-run-manifest/5",
+            "schema": "vela.discovery-run-manifest/8",
             "stage": "discovery",
             "target_id": "ck2_alpha",
             "status": "planned",
             "evidence_category": "main_discovery",
             "known_site_information_used": False,
             "software": vela_software_identity(),
+            "analysis_contract": candidate_analysis_contract(settings),
             "tasks": [dict(task, status="planned") for task in task_rows],
         },
     )
     atomic_write_json(
         run_dir / "sampling_manifest.json",
         {
-            "schema": "vela.discovery-sampling-manifest/5",
+            "schema": "vela.discovery-sampling-manifest/7",
             "stage": "discovery",
             "target_id": "ck2_alpha",
             "status": "sampling_completed",
@@ -194,15 +208,13 @@ def test_completed_normalized_run_produces_supported_candidate(tmp_path: Path) -
         "\t".join(POSE_FIELDS) + "\n" + "\n".join(evidence_rows) + "\n",
     )
 
-    analyze_discovery_run(
-        run_dir=run_dir,
-        settings=SiteAnalysisSettings(
-            contact_jaccard_distance=0.5,
-            position_distance_A=2.0,
-            min_seed_support=2,
-            min_receptor_support=2,
-        ),
-    )
+    with pytest.raises(DiscoveryError, match="differs from the frozen run"):
+        analyze_discovery_run(
+            run_dir=run_dir,
+            settings=replace(settings, position_distance_A=3.0),
+        )
+
+    analyze_discovery_run(run_dir=run_dir, settings=settings)
 
     receptor_report = run_dir / "site_analysis" / "receptor_sites.tsv"
     candidate_report = run_dir / "site_analysis" / "candidate_sites.tsv"
@@ -210,7 +222,7 @@ def test_completed_normalized_run_produces_supported_candidate(tmp_path: Path) -
     assert candidate_report.is_file()
     candidate_text = candidate_report.read_text(encoding="utf-8")
     assert "3Q04_A;3QA0_A" in candidate_text
-    assert "\ttrue\n" in candidate_text
+    assert "ensemble_consensus" in candidate_text
     assert "pose_ids" in receptor_report.read_text(encoding="utf-8").splitlines()[0]
 
     tasks = build_handoff_tasks(
@@ -219,10 +231,20 @@ def test_completed_normalized_run_produces_supported_candidate(tmp_path: Path) -
         candidate_ids=("ALPHA_C001",),
     )
 
-    assert len(tasks) == 4
-    assert {task.pose.seed for task in tasks} == {11, 22}
+    assert len(tasks) == 8
+    assert {task.pose.seed for task in tasks} == {11, 22, 33, 44}
     assert {task.pose.receptor_id for task in tasks} == {"3Q04_A", "3QA0_A"}
     assert all(task.candidate_id == "ALPHA_C001" for task in tasks)
+    assert candidate_evidence_records(
+        discovery_run_dir=run_dir,
+        candidate_ids=("ALPHA_C001",),
+    ) == [
+        {
+            "candidate_id": "ALPHA_C001",
+            "evidence_tier": "ensemble_consensus",
+            "rank_within_tier": 1,
+        }
+    ]
 
     one_pose_config = replace(
         config,

@@ -431,7 +431,7 @@ def run_cabsdock_sampling(*, config: AppConfig, run_dir: Path) -> None:
     plan_path = run_dir / "run_manifest.json"
     plan = _json_document(plan_path, name="discovery run manifest")
     if (
-        plan.get("schema") != "vela.discovery-run-manifest/5"
+        plan.get("schema") != "vela.discovery-run-manifest/8"
         or plan.get("stage") != "discovery"
         or plan.get("status") != "planned"
         or not is_current_vela_software(plan.get("software"))
@@ -529,7 +529,7 @@ def run_cabsdock_sampling(*, config: AppConfig, run_dir: Path) -> None:
     atomic_write_json(
         run_dir / "sampling_manifest.json",
         {
-            "schema": "vela.discovery-sampling-manifest/5",
+            "schema": "vela.discovery-sampling-manifest/7",
             "stage": "discovery",
             "target_id": target_id,
             "status": "sampling_completed",

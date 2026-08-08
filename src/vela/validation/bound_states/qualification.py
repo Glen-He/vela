@@ -25,6 +25,7 @@ from vela.validation.bound_states.controls import (
     rosetta_parameters,
 )
 from vela.validation.bound_states.recovery import analyze_control_recovery
+from vela.validation.bound_states.schemas import REPORT_SCHEMA
 from vela.validation.models import LocalRecoveryControl, ValidationError
 from vela.validation.records import (
     file_record,
@@ -108,6 +109,7 @@ def _prepack_control(
         nstruct=1,
         scorefile_name="prepack.sc",
         native_path=None,
+        movemap_path=None,
     )
     log_path = prepack_dir / "prepack.log"
     started_at = utc_now()
@@ -190,6 +192,7 @@ def _run_seed(
         random_translation_A=task.control.random_translation_A,
         random_rotation_degrees=task.control.random_rotation_degrees,
         lowres_preoptimize=config.validation.rosetta.lowres_preoptimize,
+        min_receptor_backbone=False,
     )
     command = build_chemistry_flexpepdock_command(
         settings=config.validation.rosetta,
@@ -202,6 +205,7 @@ def _run_seed(
         fixed_histidine_pose_indices=task.control_input.fixed_histidine_pose_indices,
         nstruct=config.validation.rosetta.decoys_per_seed,
         scorefile_name="refine.sc",
+        movemap_path=None,
     )
     log_path = task_dir / "refine.log"
     started_at = utc_now()
@@ -289,7 +293,9 @@ def _verify_plan(
     snapshot_path, _ = validate_record(
         root=run_dir, raw=snapshot, name="config snapshot"
     )
-    if config.source_snapshot_sha256 != sha256_file(snapshot_path):
+    if require_current_software and config.source_snapshot_sha256 != sha256_file(
+        snapshot_path
+    ):
         raise ValidationError("current project config differs from the frozen plan")
     if plan.get("rosetta_parameters") != rosetta_parameters(config):
         raise ValidationError("current Rosetta parameters differ from the frozen plan")
@@ -407,10 +413,20 @@ def run_qualification(*, config: AppConfig, run_dir: Path) -> QualificationOutco
     qualified, control_rows = _control_report_rows(
         controls=controls, tasks=tasks, run_dir=run_dir
     )
+    vela_version = software.get("vela_version")
+    vela_source_sha256 = software.get("vela_source_sha256")
+    if not isinstance(vela_version, str) or not isinstance(vela_source_sha256, str):
+        raise ValidationError("qualification sampling software is invalid")
+    sampling_software: dict[str, JsonValue] = {
+        "vela_version": vela_version,
+        "vela_source_sha256": vela_source_sha256,
+        "rosetta_version": tool.version,
+        "rosetta_scripts_sha256": tool.executable_sha256,
+    }
     atomic_write_json(
         report_path,
         {
-            "schema": "vela.validation-qualification-report/3",
+            "schema": REPORT_SCHEMA,
             "stage": "validation_qualification",
             "status": "qualified" if qualified else "unqualified",
             "completed_at": utc_now(),
@@ -419,10 +435,8 @@ def run_qualification(*, config: AppConfig, run_dir: Path) -> QualificationOutco
                 "path": plan_path.name,
                 "sha256": plan_sha256,
             },
-            "software": {
-                "rosetta_version": tool.version,
-                "rosetta_scripts_sha256": tool.executable_sha256,
-            },
+            "sampling_software": sampling_software,
+            "analysis_software": vela_software_identity(),
             "evidence_category": "method_positive_control",
             "ligand_candidate_evidence": False,
             "controls": control_rows,
@@ -475,7 +489,7 @@ def analyze_qualification(*, config: AppConfig, run_dir: Path) -> QualificationO
     atomic_write_json(
         report_path,
         {
-            "schema": "vela.validation-qualification-report/3",
+            "schema": REPORT_SCHEMA,
             "stage": "validation_qualification",
             "status": "qualified" if qualified else "unqualified",
             "completed_at": utc_now(),

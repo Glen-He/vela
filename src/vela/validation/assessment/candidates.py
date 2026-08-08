@@ -54,7 +54,7 @@ def _replication(
     manifest_path = root / "comparison_manifest.json"
     manifest = read_document(manifest_path, name="replication comparison manifest")
     if (
-        manifest.get("schema") != "vela.validation-replication-comparison-manifest/1"
+        manifest.get("schema") != "vela.validation-replication-comparison-manifest/2"
         or manifest.get("status") != "completed"
         or manifest.get("known_site_information_used") is not False
         or manifest.get("classification_applied") is not False
@@ -121,7 +121,7 @@ def _refinement(
     manifest_path = analysis_root / "analysis_manifest.json"
     manifest = read_document(manifest_path, name="refinement analysis manifest")
     if (
-        manifest.get("schema") != "vela.validation-refinement-analysis-manifest/1"
+        manifest.get("schema") != "vela.validation-refinement-analysis-manifest/3"
         or manifest.get("status") != "completed"
         or manifest.get("evidence_category") != evidence
         or manifest.get("known_site_information_used") is not False
@@ -215,6 +215,8 @@ def _tsv(rows: list[dict[str, str]]) -> str:
         "target",
         "main_receptor_support",
         "main_receptor_ids",
+        "main_evidence_tier",
+        "main_rank_within_tier",
         "replication_state_support",
         "replication_state_ids",
         "local_refinement_evaluated",
@@ -268,7 +270,7 @@ def write_candidate_review(
     for candidate in sorted(
         discovery.candidate_sites.values(), key=lambda item: item.candidate_id
     ):
-        if not candidate.supported:
+        if not candidate.handoff_eligible:
             continue
         replication_states = replication.get(candidate.candidate_id, ())
         refined_receptors = refined.get(candidate.candidate_id, ())
@@ -279,6 +281,8 @@ def write_candidate_review(
                 "target": candidate.target,
                 "main_receptor_support": str(candidate.receptor_support),
                 "main_receptor_ids": ";".join(candidate.receptor_ids),
+                "main_evidence_tier": candidate.evidence_tier,
+                "main_rank_within_tier": str(candidate.rank_within_tier),
                 "replication_state_support": str(len(replication_states)),
                 "replication_state_ids": ";".join(replication_states),
                 "local_refinement_evaluated": str(
@@ -310,7 +314,9 @@ def write_candidate_review(
             }
         )
     if not rows:
-        raise ValidationError("main discovery analysis has no supported candidates")
+        raise ValidationError(
+            "main discovery analysis has no handoff-eligible candidates"
+        )
     table_path = output_dir / "candidate_evidence.tsv"
     atomic_write_text(table_path, _tsv(rows))
     inputs: dict[str, JsonValue] = {
@@ -336,7 +342,7 @@ def write_candidate_review(
     atomic_write_json(
         manifest_path,
         {
-            "schema": "vela.candidate-review-manifest/1",
+            "schema": "vela.candidate-review-manifest/2",
             "stage": "validation_candidate_review",
             "status": "completed",
             "generated_at": utc_now(),

@@ -31,6 +31,7 @@ class ResolvedAnalysisSettings:
     min_heavy_atom_distance_A: float
     min_refinement_seed_support: int
     min_refinement_start_support: int
+    min_refinement_source_seed_support: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +57,8 @@ class GeometryAssessment:
     start_contact_overlap: float
     start_site_displacement_A: float
     passed: bool
+    qc_failures: tuple[str, ...]
+    chemistry_failure: str | None
     cluster_backbone: tuple[gemmi.Position, ...]
     receptor_contacts: frozenset[str]
 
@@ -81,6 +84,8 @@ class RefinedDecoy:
     start_contact_overlap: float
     start_site_displacement_A: float
     qc_status: str
+    qc_failures: tuple[str, ...]
+    chemistry_failure: str | None
     cluster_backbone: tuple[gemmi.Position, ...]
 
 
@@ -94,6 +99,8 @@ class RefinedCluster:
     decoy_ids: tuple[str, ...]
     refinement_seeds: tuple[int, ...]
     start_ids: tuple[str, ...]
+    source_seeds: tuple[int, ...]
+    task_cells: tuple[str, ...]
     representative_decoy_id: str
     supported: bool
 
@@ -107,6 +114,7 @@ def resolve_analysis_settings(
         settings.min_interface_receptor_residues,
         settings.min_refinement_seed_support,
         settings.min_refinement_start_support,
+        settings.min_refinement_source_seed_support,
     )
     numbers = (
         settings.max_receptor_ca_rmsd_A,
@@ -117,13 +125,14 @@ def resolve_analysis_settings(
     )
     if any(value is None for value in (*integers, *numbers)):
         raise ValidationError("Stage 3 analysis settings are unresolved")
-    pairs, residues, seeds, starts = integers
+    pairs, residues, seeds, starts, source_seeds = integers
     receptor_rmsd, overlap, displacement, cluster_rmsd, distance = numbers
     if (
         not isinstance(pairs, int)
         or not isinstance(residues, int)
         or not isinstance(seeds, int)
         or not isinstance(starts, int)
+        or not isinstance(source_seeds, int)
         or not isinstance(receptor_rmsd, float)
         or not isinstance(overlap, float)
         or not isinstance(displacement, float)
@@ -141,6 +150,7 @@ def resolve_analysis_settings(
         distance,
         seeds,
         starts,
+        source_seeds,
     )
 
 
@@ -170,32 +180,63 @@ def read_complex_geometry(*, path: Path, interface_contact_A: float) -> ComplexG
         raise ValidationError(f"invalid refinement structure: {path}") from exc
     if len(structure) != 1:
         raise ValidationError(f"refinement structure must contain one model: {path}")
-    chains = {chain.name: chain for chain in structure[0]}
+    model = structure[0]
+    chains = {chain.name: chain for chain in model}
     if set(chains) != {RECEPTOR_CHAIN, PEPTIDE_CHAIN}:
         raise ValidationError(f"refinement structure must contain A/P chains: {path}")
-    receptor = _amino_acids(chains[RECEPTOR_CHAIN])
+    receptor_chain = chains[RECEPTOR_CHAIN]
+    receptor = _amino_acids(receptor_chain)
     peptide = _amino_acids(chains[PEPTIDE_CHAIN])
-    receptor_atoms = tuple(
-        (residue, atom)
-        for residue in receptor
-        for atom in residue
-        if atom.element.name != "H"
-    )
     peptide_atoms = tuple(
         atom for residue in peptide for atom in residue if atom.element.name != "H"
     )
-    if not receptor_atoms or not peptide_atoms:
+    receptor_chain_index = next(
+        index for index, chain in enumerate(model) if chain.name == RECEPTOR_CHAIN
+    )
+    neighbor_search = gemmi.NeighborSearch(
+        model,
+        structure.cell,
+        interface_contact_A,
+    )
+    receptor_residue_ids: dict[int, str] = {}
+    receptor_atom_count = 0
+    for residue_index, residue in enumerate(receptor_chain):
+        if _named_atom(residue, "CA") is None:
+            continue
+        receptor_residue_ids[residue_index] = (
+            f"{residue.seqid.num}{residue.seqid.icode.strip()}"
+        )
+        for atom_index, atom in enumerate(residue):
+            if atom.element.name == "H":
+                continue
+            neighbor_search.add_atom(
+                atom,
+                receptor_chain_index,
+                residue_index,
+                atom_index,
+            )
+            receptor_atom_count += 1
+    if not receptor_atom_count or not peptide_atoms:
         raise ValidationError(f"refinement structure lacks interface atoms: {path}")
     contacts: set[str] = set()
     pairs = 0
     minimum = float("inf")
-    for residue, receptor_atom in receptor_atoms:
-        for peptide_atom in peptide_atoms:
-            distance = receptor_atom.pos.dist(peptide_atom.pos)
-            minimum = min(minimum, distance)
-            if distance <= interface_contact_A:
-                pairs += 1
-                contacts.add(f"{residue.seqid.num}{residue.seqid.icode.strip()}")
+    for peptide_atom in peptide_atoms:
+        nearest = neighbor_search.find_nearest_atom(peptide_atom.pos)
+        minimum = min(minimum, nearest.pos.dist(peptide_atom.pos))
+        for mark in neighbor_search.find_atoms(
+            peptide_atom.pos,
+            "\0",
+            min_dist=0,
+            radius=interface_contact_A,
+        ):
+            residue_id = receptor_residue_ids.get(mark.residue_idx)
+            if residue_id is None:
+                raise ValidationError(
+                    f"refinement receptor neighbor identity is invalid: {path}"
+                )
+            pairs += 1
+            contacts.add(residue_id)
     return ComplexGeometry(
         receptor_ca=tuple(
             _required_atom(residue, "CA", path=path).pos for residue in receptor
@@ -282,6 +323,8 @@ def assess_refined_decoy(
         assessment.start_contact_overlap,
         assessment.start_site_displacement_A,
         "passed" if assessment.passed else "failed",
+        assessment.qc_failures,
+        assessment.chemistry_failure,
         assessment.cluster_backbone,
     )
 
@@ -296,12 +339,16 @@ def assess_complex_geometry(
     settings: ResolvedAnalysisSettings,
 ) -> GeometryAssessment:
     """用共同门槛评价任意配体序列复合物; 供精修和序列设计复用。"""
-    validate_flexpepdock_input(
-        path=path,
-        chemistry=chemistry,
-        min_disulfide_sg_A=config.validation.min_disulfide_sg_A,
-        max_disulfide_sg_A=config.validation.max_disulfide_sg_A,
-    )
+    chemistry_failure: str | None = None
+    try:
+        validate_flexpepdock_input(
+            path=path,
+            chemistry=chemistry,
+            min_disulfide_sg_A=config.validation.min_disulfide_sg_A,
+            max_disulfide_sg_A=config.validation.max_disulfide_sg_A,
+        )
+    except ValidationError as exc:
+        chemistry_failure = str(exc)
     decoy = read_complex_geometry(
         path=path, interface_contact_A=config.validation.interface_contact_A
     )
@@ -322,14 +369,21 @@ def assess_complex_geometry(
         else 0.0
     )
     displacement = _centroid(start.peptide_ca).dist(_centroid(aligned_peptide_ca))
-    passed = (
-        decoy.interface_contact_pairs >= settings.min_interface_contact_pairs
-        and len(decoy.receptor_contacts) >= settings.min_interface_receptor_residues
-        and decoy.minimum_interface_distance_A >= settings.min_heavy_atom_distance_A
-        and receptor_rmsd <= settings.max_receptor_ca_rmsd_A
-        and overlap >= settings.min_start_contact_overlap
-        and displacement <= settings.max_start_site_displacement_A
-    )
+    failures: list[str] = []
+    if chemistry_failure is not None:
+        failures.append("chemistry_invalid")
+    if decoy.interface_contact_pairs < settings.min_interface_contact_pairs:
+        failures.append("insufficient_interface_contact_pairs")
+    if len(decoy.receptor_contacts) < settings.min_interface_receptor_residues:
+        failures.append("insufficient_interface_receptor_residues")
+    if decoy.minimum_interface_distance_A < settings.min_heavy_atom_distance_A:
+        failures.append("interchain_heavy_atom_clash")
+    if receptor_rmsd > settings.max_receptor_ca_rmsd_A:
+        failures.append("receptor_ca_rmsd_above_limit")
+    if overlap < settings.min_start_contact_overlap:
+        failures.append("start_contact_overlap_below_limit")
+    if displacement > settings.max_start_site_displacement_A:
+        failures.append("start_site_displacement_above_limit")
     return GeometryAssessment(
         decoy.interface_contact_pairs,
         len(decoy.receptor_contacts),
@@ -337,7 +391,9 @@ def assess_complex_geometry(
         receptor_rmsd,
         overlap,
         displacement,
-        passed,
+        not failures,
+        tuple(failures),
+        chemistry_failure,
         cluster_backbone,
         decoy.receptor_contacts,
     )
@@ -358,9 +414,12 @@ def _backbone_rmsd(first: RefinedDecoy, second: RefinedDecoy) -> float:
 
 
 def cluster_refined_decoys(
-    *, decoys: tuple[RefinedDecoy, ...], settings: ResolvedAnalysisSettings
+    *,
+    decoys: tuple[RefinedDecoy, ...],
+    settings: ResolvedAnalysisSettings,
+    require_source_seed_support: bool,
 ) -> tuple[RefinedCluster, ...]:
-    """按 candidate 和受体隔离聚类并以独立 seed/起点定义支持。"""
+    """按 candidate 和受体隔离聚类并核对三层独立随机来源。"""
     grouped: dict[tuple[str, str], list[RefinedDecoy]] = defaultdict(list)
     for decoy in decoys:
         if decoy.qc_status == "passed":
@@ -385,6 +444,18 @@ def cluster_refined_decoys(
             )
             seeds = tuple(sorted({item.refinement_seed for item in cluster}))
             starts = tuple(sorted({item.start_id for item in cluster}))
+            source_seeds = tuple(
+                sorted(
+                    {
+                        item.source_seed
+                        for item in cluster
+                        if item.source_seed is not None
+                    }
+                )
+            )
+            task_cells = tuple(
+                sorted({f"{item.start_id}:{item.refinement_seed}" for item in cluster})
+            )
             results.append(
                 RefinedCluster(
                     f"{candidate_id}__{receptor_id}__R{index:03d}",
@@ -393,9 +464,16 @@ def cluster_refined_decoys(
                     tuple(item.decoy_id for item in cluster),
                     seeds,
                     starts,
+                    source_seeds,
+                    task_cells,
                     representative.decoy_id,
                     len(seeds) >= settings.min_refinement_seed_support
-                    and len(starts) >= settings.min_refinement_start_support,
+                    and len(starts) >= settings.min_refinement_start_support
+                    and (
+                        not require_source_seed_support
+                        or len(source_seeds)
+                        >= settings.min_refinement_source_seed_support
+                    ),
                 )
             )
     return tuple(results)

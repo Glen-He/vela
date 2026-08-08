@@ -88,7 +88,15 @@ class CandidateSite:
     seed_support_by_receptor: tuple[str, ...]
     representative_site_id: str
     receptor_support: int
-    supported: bool
+    evidence_tier: str
+    rank_within_tier: int
+    minimum_seed_support: int
+    total_seed_support: int
+    maximum_normalized_site_distance: float
+    minimum_selected_pose_fraction: float
+    total_selected_pose_fraction: float
+    median_receptor_score_quantile: float
+    handoff_eligible: bool
 
 
 @dataclass(frozen=True, slots=True)

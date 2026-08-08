@@ -55,7 +55,7 @@ def test_project_config_resolves_paths_relative_to_config() -> None:
     )
     assert config.discovery.adapter_id == "vela-cabsdock-cyclic-site-first-cg"
     assert config.discovery.seeds == tuple(range(120623, 120631))
-    assert config.discovery.qualification.seeds == tuple(range(120663, 120671))
+    assert config.discovery.qualification.seeds == tuple(range(120679, 120687))
     assert not config.discovery.config_complete
     assert config.download.chunk_size_bytes == 1_048_576
     assert config.download.backoff_multiplier == 2.0
@@ -84,9 +84,25 @@ def test_project_config_resolves_paths_relative_to_config() -> None:
     assert config.discovery.cabsdock.temperature_final == 1.0
     assert config.discovery.target("ck2_alpha").analysis.min_seed_support == 2
     assert config.discovery.target("ck2_alpha").analysis.min_receptor_support == 2
+    assert (
+        config.discovery.target(
+            "ck2_alpha"
+        ).analysis.min_conformation_specific_seed_support
+        == 4
+    )
+    assert config.discovery.target("ck2_alpha").analysis.ensemble_candidate_budget == 32
+    assert (
+        config.discovery.target(
+            "ck2_alpha"
+        ).analysis.conformation_specific_candidate_budget
+        == 8
+    )
     assert config.validation.rosetta.parallel_tasks == 8
     assert config.validation.rosetta.decoys_per_seed == 128
     assert config.validation.seeds == (120623, 120624, 120625, 120626)
+    assert config.validation.refinement.seed_batch_sizes == (1, 1, 2)
+    assert config.validation.funnel.ensemble_screening_budget == 10
+    assert config.validation.funnel.confirmation_min_task_cells == 3
     assert config.design.objective == "single_supported_target"
     assert config.design.screen.parallel_tasks == 8
     assert config.design.finalists.parallel_tasks == 8
@@ -96,7 +112,12 @@ def test_project_config_resolves_paths_relative_to_config() -> None:
     assert config.discovery.cabsdock.max_reconstructable_disulfide_ca_distance_A == 10.0
     assert config.discovery.cabsdock.min_models_for_selection == 10
     assert config.discovery.qualification.control_target_id == "ck2_alpha"
-    assert config.discovery.qualification.control_receptor_id == "3Q9X_A"
+    assert config.discovery.qualification.control_receptor_ids == (
+        "3Q04_A",
+        "3QA0_A",
+    )
+    assert config.discovery.qualification.benchmark_receptor_id == "3Q9X_A"
+    assert config.discovery.qualification.receptor_site_diagnostic_budget == 32
     assert config.discovery.qualification.topology_calibration_status == "qualified"
     assert config.discovery.qualification.topology_calibration_report == (
         PROJECT_ROOT / "outputs/discovery/topology_calibrations/"
@@ -107,9 +128,11 @@ def test_project_config_resolves_paths_relative_to_config() -> None:
     assert config.validation.cg2all.representation == "CalphaSCModel"
     assert config.validation.cg2all.receptor_histidine_state == "HIE"
     assert config.validation.cg2all.processes == 2
-    assert config.validation.handoff.poses_per_receptor_site == 2
+    assert config.validation.handoff.poses_per_receptor_site == 4
     assert config.validation.refinement.prepack_seed == 3201
     assert config.validation.refinement.ranking_score == "reweighted_sc"
+    assert config.validation.refinement.receptor_backbone_contact_A == 6.0
+    assert config.validation.refinement.receptor_backbone_sequence_padding == 2
     assert config.design.sequence.mutable_positions == tuple(range(2, 11))
     assert config.design.combination.max_candidates == 96
     assert config.design.iteration.max_parents == 4
@@ -154,8 +177,18 @@ def test_resolved_method_status_requires_report_and_hash(
     text = path.read_text(encoding="utf-8")
     if filename == "validation.toml":
         text = text.replace(
-            'qualification_status = "unresolved"',
+            'qualification_status = "qualified"',
             'qualification_status = "failed"',
+            1,
+        )
+        text = text.replace(
+            'qualification_report = "../outputs/validation/controls/4ib5-pc-chemistry-aware-local-control-20260804/qualification_analysis/qualification_report.json"',
+            'qualification_report = "unresolved"',
+            1,
+        )
+        text = text.replace(
+            'qualification_report_sha256 = "69514733bc4b8b97bff0366ec29b3acb1491e5dc1e9d565b0f7072590d66e078"',
+            'qualification_report_sha256 = "unresolved"',
             1,
         )
     else:

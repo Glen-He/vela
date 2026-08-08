@@ -44,6 +44,8 @@ from vela.validation.records import (
     validate_record,
 )
 from vela.validation.refinement.handoff_plan import (
+    POSE_SELECTION_METHOD,
+    POSE_SELECTION_SEED_POLICY,
     CandidateHandoffTask,
     handoff_task_records,
     select_site_poses,
@@ -57,8 +59,8 @@ from vela.validation.rosetta import verify_rosetta_scripts_tool
 
 PLAN_NAME = "qualification_handoff_plan.json"
 MANIFEST_NAME = "qualification_handoff_manifest.json"
-PLAN_SCHEMA = "vela.validation-qualification-handoff-plan/4"
-MANIFEST_SCHEMA = "vela.validation-qualification-handoff-manifest/4"
+PLAN_SCHEMA = "vela.validation-qualification-handoff-plan/5"
+MANIFEST_SCHEMA = "vela.validation-qualification-handoff-manifest/5"
 EVIDENCE_CATEGORY = "qualification_development_handoff"
 SITE_RANKING = "supporting_seed_count_desc,pose_count_desc,site_id_asc"
 
@@ -172,20 +174,22 @@ def _control_task_ids(plan: dict[str, object]) -> frozenset[str]:
 def build_qualification_handoff_tasks(
     *, config: AppConfig, qualification_run_dir: Path, site_budget: int
 ) -> tuple[CandidateHandoffTask, ...]:
-    """按冻结的 native-free 排名选择 Top-B site 及跨 seed 起点。"""
-    if site_budget < 1:
-        raise ValidationError("qualification handoff site budget must be positive")
+    """按冻结的 native-free 排名选择 Top-B site 及非冗余起点。"""
+    if site_budget != config.discovery.qualification.receptor_site_diagnostic_budget:
+        raise ValidationError(
+            "qualification handoff must use the frozen site delivery budget"
+        )
     plan, _ = _qualification_documents(qualification_run_dir)
     try:
         scope = object_mapping(plan.get("control_scope"), name="control scope")
     except TypeError as exc:
         raise ValidationError("qualification control scope is invalid") from exc
     target_id = scope.get("control_target_id")
-    receptor_id = scope.get("control_receptor_id")
+    receptor_ids = scope.get("control_receptor_ids")
     if (
         target_id != config.discovery.qualification.control_target_id
-        or receptor_id != config.discovery.qualification.control_receptor_id
-        or scope.get("target_matched") is not True
+        or receptor_ids != list(config.discovery.qualification.control_receptor_ids)
+        or scope.get("protein_target_matched") is not True
     ):
         raise ValidationError(
             "qualification control does not match the current project"
@@ -199,60 +203,71 @@ def build_qualification_handoff_tasks(
         )
         if pose.task_id in control_ids
     )
-    analysis = config.discovery.target(str(target_id)).analysis
-    sites = tuple(
-        sorted(
-            (
-                site
-                for site in analyze_sites(poses=poses, settings=analysis).receptor_sites
-                if site.supported
-            ),
-            key=lambda site: (
-                -len(site.supporting_seeds),
-                -site.pose_count,
-                site.site_id,
-            ),
-        )
-    )
-    if len(sites) < site_budget:
-        raise ValidationError(
-            f"qualification control has only {len(sites)} supported sites; "
-            f"requested {site_budget}"
-        )
     pose_by_id = {pose.pose_id: pose for pose in poses}
-    reference_receptor_path = (
-        config.paths.data_dir / "receptors" / "prepared" / f"{receptor_id}.cif"
-    )
-    if not reference_receptor_path.is_file():
-        raise ValidationError(
-            f"prepared control receptor is missing: {reference_receptor_path}"
-        )
-    reference_hash = sha256_file(reference_receptor_path)
+    analysis = config.discovery.target(str(target_id)).analysis
     chemistry = control_chemistry(control_bound_state(config))
     tasks: list[CandidateHandoffTask] = []
-    for site in sites[:site_budget]:
-        candidate_id = safe_identifier(site.site_id, name="qualification site ID")
-        for pose in select_site_poses(
-            site=site,
-            pose_by_id=pose_by_id,
-            count=config.validation.handoff.poses_per_receptor_site,
-            peptide_sequence=chemistry.sequence,
-            reference_receptor_path=reference_receptor_path,
-            pose_clustering_rmsd_A=(config.discovery.cabsdock.pose_clustering_rmsd_A),
-        ):
-            task_id = safe_identifier(
-                f"{site.site_id}__{pose.pose_id}", name="qualification handoff task ID"
+    for receptor_id in config.discovery.qualification.control_receptor_ids:
+        receptor_poses = tuple(
+            pose for pose in poses if pose.receptor_id == receptor_id
+        )
+        sites = tuple(
+            sorted(
+                (
+                    site
+                    for site in analyze_sites(
+                        poses=receptor_poses, settings=analysis
+                    ).receptor_sites
+                    if site.supported
+                ),
+                key=lambda site: (
+                    -len(site.supporting_seeds),
+                    -site.pose_count,
+                    site.site_id,
+                ),
             )
-            tasks.append(
-                CandidateHandoffTask(
-                    task_id=task_id,
-                    candidate_id=candidate_id,
-                    receptor_site_id=site.site_id,
-                    pose=pose,
-                    reference_receptor_path=reference_receptor_path,
-                    reference_receptor_sha256=reference_hash,
+        )
+        if len(sites) < site_budget:
+            raise ValidationError(
+                f"qualification control {receptor_id} has only {len(sites)} "
+                f"supported sites; requested {site_budget}"
+            )
+        reference_receptor_path = (
+            config.paths.data_dir / "receptors" / "prepared" / f"{receptor_id}.cif"
+        )
+        if not reference_receptor_path.is_file():
+            raise ValidationError(
+                f"prepared control receptor is missing: {reference_receptor_path}"
+            )
+        reference_hash = sha256_file(reference_receptor_path)
+        for site in sites[:site_budget]:
+            candidate_id = safe_identifier(
+                f"{receptor_id}__{site.site_id}", name="qualification site ID"
+            )
+            for pose in select_site_poses(
+                site=site,
+                pose_by_id=pose_by_id,
+                count=config.validation.handoff.poses_per_receptor_site,
+                peptide_sequence=chemistry.sequence,
+                reference_receptor_path=reference_receptor_path,
+                pose_clustering_rmsd_A=(
+                    config.discovery.cabsdock.pose_clustering_rmsd_A
+                ),
+            ):
+                task_id = safe_identifier(
+                    f"{receptor_id}__{site.site_id}__{pose.pose_id}",
+                    name="qualification handoff task ID",
                 )
-            )
+                tasks.append(
+                    CandidateHandoffTask(
+                        task_id=task_id,
+                        candidate_id=candidate_id,
+                        receptor_site_id=site.site_id,
+                        pose=pose,
+                        reference_receptor_path=reference_receptor_path,
+                        reference_receptor_sha256=reference_hash,
+                    )
+                )
     return tuple(tasks)
 
 
@@ -343,11 +358,8 @@ def write_qualification_handoff_plan(
                 "pose_clustering_rmsd_A": (
                     config.discovery.cabsdock.pose_clustering_rmsd_A
                 ),
-                "pose_selection": (
-                    "pose_cluster_seed_support_desc,population_desc,energy_asc; "
-                    "cluster_medoid; distinct_seed; within_cluster_fill_if_needed"
-                ),
-                "distinct_seed_required": True,
+                "pose_selection": POSE_SELECTION_METHOD,
+                "source_seed_policy": POSE_SELECTION_SEED_POLICY,
                 "native_metrics_read": False,
             },
             "execution": {
@@ -425,12 +437,8 @@ def _verify_plan(
         != config.validation.handoff.poses_per_receptor_site
         or selection.get("pose_clustering_rmsd_A")
         != config.discovery.cabsdock.pose_clustering_rmsd_A
-        or selection.get("pose_selection")
-        != (
-            "pose_cluster_seed_support_desc,population_desc,energy_asc; "
-            "cluster_medoid; distinct_seed; within_cluster_fill_if_needed"
-        )
-        or selection.get("distinct_seed_required") is not True
+        or selection.get("pose_selection") != POSE_SELECTION_METHOD
+        or selection.get("source_seed_policy") != POSE_SELECTION_SEED_POLICY
         or selection.get("native_metrics_read") is not False
     ):
         raise ValidationError("qualification handoff selection contract changed")
